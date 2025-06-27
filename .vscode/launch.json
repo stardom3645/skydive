@@ -1,0 +1,14 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+      {
+          "name": "Launch file",
+          "type": "go",
+          "request": "launch",
+          "mode": "debug",
+          "program": "${workspaceFolder}",
+          "args": ["analyzer", "--listen", "0.0.0.0:8082"],
+          "showLog": true
+      }
+    ]
+  }
