@@ -20,6 +20,7 @@ package ovsdb
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -213,18 +214,32 @@ func (o *OvsClient) RetrieveSkydiveProbeRowUUIDs(table string) ([]string, error)
 
 // RetrieveSkydiveProbeRowUUID return the row probe UUID
 func (o *OvsClient) RetrieveSkydiveProbeRowUUID(table, id string) (string, error) {
-	uuids, err := o.RetrieveSkydiveProbeRowUUIDs(table)
+	mapCond, _ := libovsdb.NewOvsMap(map[string]string{"skydive-probe-id": id})
+	condition := libovsdb.NewCondition("external_ids", "includes", mapCond)
+	selectOp := libovsdb.Operation{
+		Op:    "select",
+		Table: table,
+		Where: []interface{}{condition},
+	}
+
+	result, err := o.Exec(selectOp)
 	if err != nil {
 		return "", err
 	}
 
-	for _, probeID := range uuids {
-		if probeID == id {
-			return id, nil
+	for _, res := range result {
+		for _, row := range res.Rows {
+			if uuidField, ok := row["_uuid"]; ok {
+				if uuidPair, ok := uuidField.([]interface{}); ok && len(uuidPair) == 2 {
+					if uuidStr, ok := uuidPair[1].(string); ok {
+						return uuidStr, nil
+					}
+				}
+			}
 		}
 	}
 
-	return "", nil
+	return "", fmt.Errorf("no matching UUID found for probe-id=%s in table=%s", id, table)
 }
 
 // Exec execute a transaction on the OVS database
