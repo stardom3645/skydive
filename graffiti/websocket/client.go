@@ -18,6 +18,7 @@
 package websocket
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -31,6 +32,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/safchain/insanelock"
+	"google.golang.org/appengine/log"
 
 	shttp "github.com/skydive-project/skydive/graffiti/http"
 	"github.com/skydive-project/skydive/graffiti/logging"
@@ -59,6 +61,8 @@ type ConnStatus struct {
 	RemoteHost        string       `json:",omitempty"`
 	RemoteServiceType service.Type `json:",omitempty"`
 }
+
+var lastLogTime time.Time
 
 // Store atomatically stores the state
 func (s *ConnState) Store(state service.State) {
@@ -539,9 +543,18 @@ func (c *Client) Connect() error {
 	d.TLSClientConfig = c.TLSConfig
 
 	var resp *http.Response
-	c.conn, resp, err = d.Dial(endpoint, headers)
-	if err != nil {
-		return fmt.Errorf("Unable to create a WebSocket connection %s : %s", endpoint, err)
+
+	for {
+		c.conn, resp, err = d.Dial(endpoint, headers)
+		if err != nil {
+			if time.Since(lastLogTime) > 30*time.Minute {
+				log.Errorf(context.Background(), "WebSocket 연결 실패 (%s): %v", endpoint, err)
+				lastLogTime = time.Now()
+			}
+			time.Sleep(10 * time.Second)
+			continue
+		}
+		break
 	}
 
 	if c.RemoteHost = resp.Header.Get("X-Host-ID"); c.RemoteHost == "" {
