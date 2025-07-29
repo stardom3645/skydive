@@ -31,6 +31,7 @@ import (
 	"github.com/skydive-project/dede/dede"
 	api "github.com/skydive-project/skydive/api/server"
 	"github.com/skydive-project/skydive/api/types"
+	"github.com/skydive-project/skydive/common"
 	"github.com/skydive-project/skydive/config"
 	"github.com/skydive-project/skydive/flow"
 	ondemand "github.com/skydive-project/skydive/flow/ondemand/client"
@@ -362,6 +363,12 @@ func NewServerFromConfig() (*Server, error) {
 	httpServer := hub.HTTPServer()
 	api.RegisterPcapAPI(httpServer, s.flowStorage, apiAuthBackend)
 	api.RegisterConfigAPI(httpServer, apiAuthBackend)
+
+	// DB 캐시 로딩
+	common.LoadVmNameMapFromCloudstack()
+
+	// API 등록
+	api.RegisterVmNameMapAPI(httpServer, common.GetVmNameMap)
 
 	if err := s.loadStaticWorkflows(); err != nil {
 		return nil, err
