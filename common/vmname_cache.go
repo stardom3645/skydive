@@ -30,9 +30,9 @@ func LoadVmNameMapFromCloudstack() {
 
 	temp := make(map[string]string)
 	for rows.Next() {
-		var libvirt, display string
-		if err := rows.Scan(&libvirt, &display); err == nil {
-			temp[libvirt] = display
+		var instanceName, vmName string // instance_name, name
+		if err := rows.Scan(&instanceName, &vmName); err == nil {
+			temp[instanceName] = vmName
 		}
 	}
 
