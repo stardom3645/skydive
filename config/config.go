@@ -189,8 +189,7 @@ func init() {
 	cfg.SetDefault("opencontrail.port", 8085)
 
 	cfg.SetDefault("mold.console.enabled", false)
-	cfg.SetDefault("mold.api.endpoint", "http://127.0.0.1:8080/client/api")
-	cfg.SetDefault("mold.api.username", "admin")
+	cfg.SetDefault("mold.console.apiEndpoint", "")
 	cfg.SetDefault("mold.db.host", "127.0.0.1")
 	cfg.SetDefault("mold.db.port", 3306)
 	cfg.SetDefault("mold.db.name", "cloud")

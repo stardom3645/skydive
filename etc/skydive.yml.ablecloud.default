@@ -14,9 +14,7 @@ agent:
 mold:
   console:
     enabled: true
-  api:
-    endpoint: "http://ccvm:8082/client/api"
-    username: "admin"
+    apiEndpoint: "http://ccvm:8080/api/netdive/vmconsole"
   db:
     host: "127.0.0.1"
     port: 3306

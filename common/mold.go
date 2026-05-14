@@ -19,13 +19,12 @@ type MoldDBConfig struct {
 	PasswordFile string
 }
 
-type MoldAPIConfig struct {
-	Endpoint string
-	Username string
-}
-
 func IsMoldConsoleEnabled() bool {
 	return config.GetBool("mold.console.enabled")
+}
+
+func GetMoldConsoleAPIEndpoint() string {
+	return config.GetString("mold.console.apiEndpoint")
 }
 
 func GetMoldDBConfig() MoldDBConfig {
@@ -35,13 +34,6 @@ func GetMoldDBConfig() MoldDBConfig {
 		Name:         config.GetString("mold.db.name"),
 		User:         config.GetString("mold.db.user"),
 		PasswordFile: config.GetString("mold.db.passwordFile"),
-	}
-}
-
-func GetMoldAPIConfig() MoldAPIConfig {
-	return MoldAPIConfig{
-		Endpoint: config.GetString("mold.api.endpoint"),
-		Username: config.GetString("mold.api.username"),
 	}
 }
 
@@ -87,37 +79,6 @@ func ResolveVMIDFromNodeID(nodeID string) (string, error) {
 	}
 
 	return vmID, nil
-}
-
-func GetMoldAdminKeys() (string, string, error) {
-	apiCfg := GetMoldAPIConfig()
-	db, err := OpenMoldDB()
-	if err != nil {
-		return "", "", err
-	}
-	defer db.Close()
-
-	return getMoldAPIKeysFromDB(db, apiCfg.Username)
-}
-
-func getMoldAPIKeysFromDB(db *sql.DB, username string) (string, string, error) {
-	var apiKey, secretKey string
-	query := `
-		SELECT k.api_key, k.secret_key
-		FROM user u
-		JOIN api_keypair k ON k.user_id = u.id
-		WHERE u.username = ?
-		  AND k.removed IS NULL
-		  AND (k.start_date IS NULL OR k.start_date <= NOW())
-		  AND (k.end_date IS NULL OR k.end_date >= NOW())
-		ORDER BY k.created DESC, k.id DESC
-		LIMIT 1`
-	err := db.QueryRow(query, username).Scan(&apiKey, &secretKey)
-	if err != nil {
-		return "", "", err
-	}
-
-	return apiKey, secretKey, nil
 }
 
 func readPasswordFile(path string) (string, error) {
