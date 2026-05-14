@@ -10,3 +10,16 @@ agent:
       - socketinfo
       - lldp
       - libvirt
+
+mold:
+  console:
+    enabled: false
+  api:
+    endpoint: "http://127.0.0.1:8080/client/api"
+    username: "admin"
+  db:
+    host: "127.0.0.1"
+    port: 3306
+    name: "cloud"
+    user: "cloud"
+    passwordFile: "/etc/skydive/secrets/mold-db-password"

@@ -188,6 +188,15 @@ func init() {
 	cfg.SetDefault("opencontrail.mpls_udp_port", 51234)
 	cfg.SetDefault("opencontrail.port", 8085)
 
+	cfg.SetDefault("mold.console.enabled", false)
+	cfg.SetDefault("mold.api.endpoint", "http://127.0.0.1:8080/client/api")
+	cfg.SetDefault("mold.api.username", "admin")
+	cfg.SetDefault("mold.db.host", "127.0.0.1")
+	cfg.SetDefault("mold.db.port", 3306)
+	cfg.SetDefault("mold.db.name", "cloud")
+	cfg.SetDefault("mold.db.user", "cloud")
+	cfg.SetDefault("mold.db.passwordFile", "/etc/skydive/secrets/mold-db-password")
+
 	cfg.SetDefault("ovs.ovsdb", "unix:///var/run/openvswitch/db.sock")
 	cfg.SetDefault("ovs.oflow.enable", false)
 	cfg.SetDefault("ovs.oflow.openflow_versions", []string{"OpenFlow10", "OpenFlow11", "OpenFlow12", "OpenFlow13", "OpenFlow14"})

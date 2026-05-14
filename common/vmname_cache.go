@@ -1,11 +1,8 @@
 package common
 
 import (
-	"database/sql"
 	"log"
 	"sync"
-
-	_ "github.com/go-sql-driver/mysql"
 )
 
 var (
@@ -14,7 +11,7 @@ var (
 )
 
 func LoadVmNameMapFromCloudstack() {
-	db, err := sql.Open("mysql", "cloud:Ablecloud1!@tcp(localhost:3306)/cloud")
+	db, err := OpenMoldDB()
 	if err != nil {
 		log.Printf("DB 연결 실패: %v", err)
 		return
