@@ -97,17 +97,22 @@ func GetMoldAdminKeys() (string, string, error) {
 	}
 	defer db.Close()
 
+	return getMoldAPIKeysFromDB(db, apiCfg.Username)
+}
+
+func getMoldAPIKeysFromDB(db *sql.DB, username string) (string, string, error) {
 	var apiKey, secretKey string
 	query := `
-		SELECT api_key, secret_key
-		FROM user
-		WHERE removed IS NULL
-		  AND username = ?
-		  AND api_key IS NOT NULL
-		  AND secret_key IS NOT NULL
-		ORDER BY id DESC
+		SELECT k.api_key, k.secret_key
+		FROM user u
+		JOIN api_keypair k ON k.user_id = u.id
+		WHERE u.username = ?
+		  AND k.removed IS NULL
+		  AND (k.start_date IS NULL OR k.start_date <= NOW())
+		  AND (k.end_date IS NULL OR k.end_date >= NOW())
+		ORDER BY k.created DESC, k.id DESC
 		LIMIT 1`
-	err = db.QueryRow(query, apiCfg.Username).Scan(&apiKey, &secretKey)
+	err := db.QueryRow(query, username).Scan(&apiKey, &secretKey)
 	if err != nil {
 		return "", "", err
 	}
