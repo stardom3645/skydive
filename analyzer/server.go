@@ -65,7 +65,7 @@ const workflowAssetDir = "statics/workflows"
 
 // Status analyzer object
 //
-// Status describes the status of an analyzer
+// # Status describes the status of an analyzer
 //
 // swagger:model AnalyzerStatus
 // easyjson:json
@@ -369,6 +369,7 @@ func NewServerFromConfig() (*Server, error) {
 
 	// API 등록
 	api.RegisterVmNameMapAPI(httpServer, common.GetVmNameMap)
+	api.RegisterMoldVMConsoleAPI(httpServer)
 
 	if err := s.loadStaticWorkflows(); err != nil {
 		return nil, err
