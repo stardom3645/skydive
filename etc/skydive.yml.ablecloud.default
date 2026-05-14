@@ -13,7 +13,7 @@ agent:
 
 mold:
   console:
-    enabled: false
+    enabled: true
   api:
     endpoint: "http://ccvm:8082/client/api"
     username: "admin"
