@@ -24,9 +24,10 @@ func handleMoldVMConsole(w http.ResponseWriter, r *http.Request) {
 
 	nodeID := r.URL.Query().Get("nodeId")
 	vmID := r.URL.Query().Get("vmId")
+	instanceName := r.URL.Query().Get("instanceName")
 	mock := r.URL.Query().Get("mock")
 
-	consoleURL, err := getMoldVMConsoleURL(nodeID, vmID, mock)
+	consoleURL, err := getMoldVMConsoleURL(nodeID, vmID, instanceName, mock)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -39,8 +40,8 @@ func handleMoldVMConsole(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func getMoldVMConsoleURL(nodeID, vmID, mock string) (string, error) {
-	resolvedVMID, err := resolveVMID(nodeID, vmID)
+func getMoldVMConsoleURL(nodeID, vmID, instanceName, mock string) (string, error) {
+	resolvedVMID, err := resolveVMID(nodeID, vmID, instanceName)
 	if err != nil {
 		return "", err
 	}
@@ -48,13 +49,24 @@ func getMoldVMConsoleURL(nodeID, vmID, mock string) (string, error) {
 	return requestMoldConsoleURL(nodeID, resolvedVMID, mock)
 }
 
-func resolveVMID(nodeID, vmID string) (string, error) {
+func resolveVMID(nodeID, vmID, instanceName string) (string, error) {
 	if vmID != "" {
 		return vmID, nil
 	}
 
+	if instanceName != "" {
+		resolvedVMID, err := common.ResolveVMIDFromInstanceName(instanceName)
+		if err != nil {
+			return "", fmt.Errorf("failed to resolve vmId from instanceName")
+		}
+		if resolvedVMID == "" {
+			return "", fmt.Errorf("vmId not found from instanceName")
+		}
+		return resolvedVMID, nil
+	}
+
 	if nodeID == "" {
-		return "", fmt.Errorf("nodeId or vmId is required")
+		return "", fmt.Errorf("nodeId, instanceName or vmId is required")
 	}
 
 	resolvedVMID, err := common.ResolveVMIDFromNodeID(nodeID)

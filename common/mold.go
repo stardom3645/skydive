@@ -81,6 +81,29 @@ func ResolveVMIDFromNodeID(nodeID string) (string, error) {
 	return vmID, nil
 }
 
+func ResolveVMIDFromInstanceName(instanceName string) (string, error) {
+	db, err := OpenMoldDB()
+	if err != nil {
+		return "", err
+	}
+	defer db.Close()
+
+	var vmID string
+	query := `
+		SELECT uuid
+		FROM vm_instance
+		WHERE removed IS NULL
+		  AND instance_name = ?
+		ORDER BY id DESC
+		LIMIT 1`
+	err = db.QueryRow(query, instanceName).Scan(&vmID)
+	if err != nil {
+		return "", err
+	}
+
+	return vmID, nil
+}
+
 func readPasswordFile(path string) (string, error) {
 	if path == "" {
 		return "", fmt.Errorf("mold.db.passwordFile is empty")
