@@ -24,8 +24,9 @@ func handleMoldVMConsole(w http.ResponseWriter, r *http.Request) {
 
 	nodeID := r.URL.Query().Get("nodeId")
 	vmID := r.URL.Query().Get("vmId")
+	mock := r.URL.Query().Get("mock")
 
-	consoleURL, err := getMoldVMConsoleURL(nodeID, vmID)
+	consoleURL, err := getMoldVMConsoleURL(nodeID, vmID, mock)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -38,13 +39,13 @@ func handleMoldVMConsole(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func getMoldVMConsoleURL(nodeID, vmID string) (string, error) {
+func getMoldVMConsoleURL(nodeID, vmID, mock string) (string, error) {
 	resolvedVMID, err := resolveVMID(nodeID, vmID)
 	if err != nil {
 		return "", err
 	}
 
-	return requestMoldConsoleURL(nodeID, resolvedVMID)
+	return requestMoldConsoleURL(nodeID, resolvedVMID, mock)
 }
 
 func resolveVMID(nodeID, vmID string) (string, error) {
@@ -67,21 +68,29 @@ func resolveVMID(nodeID, vmID string) (string, error) {
 	return resolvedVMID, nil
 }
 
-func requestMoldConsoleURL(nodeID, vmID string) (string, error) {
+func requestMoldConsoleURL(nodeID, vmID, mock string) (string, error) {
 	endpoint := common.GetMoldConsoleAPIEndpoint()
 	if endpoint == "" {
 		return "", fmt.Errorf("mold.console.apiEndpoint is empty")
 	}
 
-	params := url.Values{}
+	baseURL, err := url.Parse(endpoint)
+	if err != nil {
+		return "", fmt.Errorf("invalid mold console api endpoint")
+	}
+
+	params := baseURL.Query()
 	params.Set("vmId", vmID)
 	if nodeID != "" {
 		params.Set("nodeId", nodeID)
 	}
-	requestURL := endpoint + "?" + params.Encode()
+	if mock == "true" {
+		params.Set("mock", "true")
+	}
+	baseURL.RawQuery = params.Encode()
 
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(requestURL)
+	resp, err := client.Get(baseURL.String())
 	if err != nil {
 		return "", fmt.Errorf("failed to call mold console api")
 	}
