@@ -117,18 +117,6 @@ func requestMoldConsoleURL(vmID, mock string) (string, error) {
 		return "", err
 	}
 
-	// CloudStack/Mold builds can differ on VM identifier parameter naming.
-	// Try "id" first, then fallback to "virtualmachineid" only on failure.
-	if url, status, err := callMoldAPI(client, baseURL, apiCfg.Command, apiKey, secretKey, []apiParam{
-		{Key: "command", Value: apiCfg.Command},
-		{Key: "response", Value: "json"},
-		{Key: "apikey", Value: apiKey},
-		{Key: "id", Value: vmID},
-	}); err == nil {
-		return url, nil
-	} else if status != http.StatusUnauthorized {
-		return "", err
-	}
 	if url, _, err := callMoldAPI(client, baseURL, apiCfg.Command, apiKey, secretKey, []apiParam{
 		{Key: "command", Value: apiCfg.Command},
 		{Key: "response", Value: "json"},
