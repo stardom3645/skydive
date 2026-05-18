@@ -2,7 +2,7 @@ package server
 
 import (
 	"crypto/hmac"
-	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -111,8 +111,6 @@ func requestMoldConsoleURL(vmID, mock string) (string, error) {
 	params.Set("response", "json")
 	params.Set("apikey", apiKey)
 	params.Set("id", vmID)
-	params.Set("virtualmachineid", vmID)
-	params.Set("vmid", vmID)
 
 	signature := buildMoldAPISignature(params, secretKey)
 	params.Set("signature", signature)
@@ -184,12 +182,12 @@ func buildMoldAPISignature(params url.Values, secretKey string) string {
 			continue
 		}
 		key := strings.ToLower(k)
-		value := strings.ToLower(values[0])
+		value := values[0]
 		parts = append(parts, fmt.Sprintf("%s=%s", key, moldEscape(value)))
 	}
 
-	toSign := strings.Join(parts, "&")
-	h := hmac.New(sha1.New, []byte(secretKey))
+	toSign := strings.ToLower(strings.Join(parts, "&"))
+	h := hmac.New(sha256.New, []byte(secretKey))
 	_, _ = h.Write([]byte(toSign))
 	return base64.StdEncoding.EncodeToString(h.Sum(nil))
 }
