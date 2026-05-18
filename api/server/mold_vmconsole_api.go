@@ -106,46 +106,61 @@ func requestMoldConsoleURL(vmID, mock string) (string, error) {
 		return "", fmt.Errorf("invalid mold api endpoint")
 	}
 
-	params := baseURL.Query()
-	params.Set("command", apiCfg.Command)
-	params.Set("response", "json")
-	params.Set("apikey", apiKey)
-	params.Set("id", vmID)
-
-	signature := buildMoldAPISignature(params, secretKey)
-	params.Set("signature", signature)
-	baseURL.RawQuery = params.Encode()
-
 	client := &http.Client{
 		Timeout: 10 * time.Second,
 		Transport: &http.Transport{
 			DialContext: (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
 		},
 	}
-	resp, err := client.Get(baseURL.String())
+
+	// CloudStack/Mold builds can differ on VM identifier parameter naming.
+	// Try "id" first, then fallback to "virtualmachineid" only on failure.
+	if url, status, err := callMoldAPI(client, baseURL, apiCfg.Command, apiKey, secretKey, vmID, "id"); err == nil {
+		return url, nil
+	} else if status != http.StatusUnauthorized {
+		return "", err
+	}
+	if url, _, err := callMoldAPI(client, baseURL, apiCfg.Command, apiKey, secretKey, vmID, "virtualmachineid"); err == nil {
+		return url, nil
+	} else {
+		return "", err
+	}
+}
+
+func callMoldAPI(client *http.Client, baseURL *url.URL, command, apiKey, secretKey, vmID, vmIDParam string) (string, int, error) {
+	u := *baseURL
+	params := u.Query()
+	params.Set("command", command)
+	params.Set("response", "json")
+	params.Set("apikey", apiKey)
+	params.Set(vmIDParam, vmID)
+
+	signature := buildMoldAPISignature(params, secretKey)
+	params.Set("signature", signature)
+	u.RawQuery = params.Encode()
+
+	resp, err := client.Get(u.String())
 	if err != nil {
-		return "", fmt.Errorf("failed to call mold api")
+		return "", 0, fmt.Errorf("failed to call mold api")
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("mold api returned status %d", resp.StatusCode)
-	}
-
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("failed to read mold api response")
+		return "", resp.StatusCode, fmt.Errorf("failed to read mold api response")
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", resp.StatusCode, fmt.Errorf("mold api returned status %d", resp.StatusCode)
 	}
 
 	consoleURL, err := parseMoldConsoleURL(body)
 	if err != nil {
-		return "", err
+		return "", resp.StatusCode, err
 	}
 	if consoleURL == "" {
-		return "", fmt.Errorf("console url not found")
+		return "", resp.StatusCode, fmt.Errorf("console url not found")
 	}
-
-	return consoleURL, nil
+	return consoleURL, resp.StatusCode, nil
 }
 
 func parseMoldConsoleURL(body []byte) (string, error) {
