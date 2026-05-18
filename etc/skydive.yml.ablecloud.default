@@ -14,7 +14,12 @@ agent:
 mold:
   console:
     enabled: true
-    apiEndpoint: "http://ccvm:8080/api/netdive/vmconsole"
+    allowMock: false
+  api:
+    endpoint: "http://ccvm:8080/client/api"
+    command: "getVirtualMachineConsoleProxyUrl"
+    apiKeyFile: "/usr/share/ablestack/ablestack-netdive/secrets/mold-api-key"
+    secretKeyFile: "/usr/share/ablestack/ablestack-netdive/secrets/mold-secret-key"
   db:
     host: "127.0.0.1"
     port: 3306
