@@ -113,31 +113,54 @@ func requestMoldConsoleURL(vmID, mock string) (string, error) {
 		},
 	}
 
+	if err := verifyMoldAPIListCapabilities(client, baseURL, apiKey, secretKey); err != nil {
+		return "", err
+	}
+
 	// CloudStack/Mold builds can differ on VM identifier parameter naming.
 	// Try "id" first, then fallback to "virtualmachineid" only on failure.
-	if url, status, err := callMoldAPI(client, baseURL, apiCfg.Command, apiKey, secretKey, vmID, "id"); err == nil {
+	if url, status, err := callMoldAPI(client, baseURL, apiCfg.Command, apiKey, secretKey, []apiParam{
+		{Key: "command", Value: apiCfg.Command},
+		{Key: "response", Value: "json"},
+		{Key: "apikey", Value: apiKey},
+		{Key: "id", Value: vmID},
+	}); err == nil {
 		return url, nil
 	} else if status != http.StatusUnauthorized {
 		return "", err
 	}
-	if url, _, err := callMoldAPI(client, baseURL, apiCfg.Command, apiKey, secretKey, vmID, "virtualmachineid"); err == nil {
+	if url, _, err := callMoldAPI(client, baseURL, apiCfg.Command, apiKey, secretKey, []apiParam{
+		{Key: "command", Value: apiCfg.Command},
+		{Key: "response", Value: "json"},
+		{Key: "apikey", Value: apiKey},
+		{Key: "virtualmachineid", Value: vmID},
+	}); err == nil {
 		return url, nil
 	} else {
 		return "", err
 	}
 }
 
-func callMoldAPI(client *http.Client, baseURL *url.URL, command, apiKey, secretKey, vmID, vmIDParam string) (string, int, error) {
-	u := *baseURL
-	params := u.Query()
-	params.Set("command", command)
-	params.Set("response", "json")
-	params.Set("apikey", apiKey)
-	params.Set(vmIDParam, vmID)
+type apiParam struct {
+	Key   string
+	Value string
+}
 
-	signature := buildMoldAPISignature(params, secretKey)
-	params.Set("signature", signature)
-	u.RawQuery = params.Encode()
+func verifyMoldAPIListCapabilities(client *http.Client, baseURL *url.URL, apiKey, secretKey string) error {
+	_, _, err := callMoldAPI(client, baseURL, "listCapabilities", apiKey, secretKey, []apiParam{
+		{Key: "command", Value: "listCapabilities"},
+		{Key: "response", Value: "json"},
+		{Key: "apikey", Value: apiKey},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to verify mold api credentials")
+	}
+	return nil
+}
+
+func callMoldAPI(client *http.Client, baseURL *url.URL, command, apiKey, secretKey string, reqParams []apiParam) (string, int, error) {
+	u := *baseURL
+	u.RawQuery = buildSignedRawQuery(reqParams, secretKey)
 
 	resp, err := client.Get(u.String())
 	if err != nil {
@@ -150,7 +173,13 @@ func callMoldAPI(client *http.Client, baseURL *url.URL, command, apiKey, secretK
 		return "", resp.StatusCode, fmt.Errorf("failed to read mold api response")
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if command == "listCapabilities" {
+			return "", resp.StatusCode, fmt.Errorf("mold api listCapabilities returned status %d", resp.StatusCode)
+		}
 		return "", resp.StatusCode, fmt.Errorf("mold api returned status %d", resp.StatusCode)
+	}
+	if command == "listCapabilities" {
+		return "ok", resp.StatusCode, nil
 	}
 
 	consoleURL, err := parseMoldConsoleURL(body)
@@ -181,37 +210,41 @@ func parseMoldConsoleURL(body []byte) (string, error) {
 	return "", fmt.Errorf("console url not found in mold api response")
 }
 
-func buildMoldAPISignature(params url.Values, secretKey string) string {
-	keys := make([]string, 0, len(params))
-	for k := range params {
-		keys = append(keys, k)
+func buildSignedRawQuery(reqParams []apiParam, secretKey string) string {
+	requestParts := make([]string, 0, len(reqParams))
+	reqMap := make(map[string]string, len(reqParams))
+	for _, p := range reqParams {
+		requestParts = append(requestParts, p.Key+"="+quotePlus(p.Value))
+		reqMap[p.Key] = p.Value
 	}
-	sort.Slice(keys, func(i, j int) bool {
-		return strings.ToLower(keys[i]) < strings.ToLower(keys[j])
-	})
-
-	parts := make([]string, 0, len(keys))
-	for _, k := range keys {
-		values := params[k]
-		if len(values) == 0 {
-			continue
-		}
-		key := strings.ToLower(k)
-		value := values[0]
-		parts = append(parts, fmt.Sprintf("%s=%s", key, moldEscape(value)))
-	}
-
-	toSign := strings.ToLower(strings.Join(parts, "&"))
-	h := hmac.New(sha256.New, []byte(secretKey))
-	_, _ = h.Write([]byte(toSign))
-	return base64.StdEncoding.EncodeToString(h.Sum(nil))
+	requestStr := strings.Join(requestParts, "&")
+	signature := buildMoldAPISignature(reqMap, secretKey)
+	return requestStr + "&signature=" + quotePlus(signature)
 }
 
-func moldEscape(s string) string {
-	escaped := url.QueryEscape(s)
-	escaped = strings.ReplaceAll(escaped, "+", "%20")
-	escaped = strings.ReplaceAll(escaped, "*", "%2A")
-	return strings.ReplaceAll(escaped, "%7E", "~")
+func buildMoldAPISignature(reqMap map[string]string, secretKey string) string {
+	keys := make([]string, 0, len(reqMap))
+	for k := range reqMap {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	parts := make([]string, 0, len(reqMap))
+	for _, k := range keys {
+		key := strings.ToLower(k)
+		value := strings.ToLower(quotePlus(reqMap[k]))
+		value = strings.ReplaceAll(value, "+", "%20")
+		parts = append(parts, fmt.Sprintf("%s=%s", key, value))
+	}
+
+	toSign := strings.Join(parts, "&")
+	h := hmac.New(sha256.New, []byte(secretKey))
+	_, _ = h.Write([]byte(toSign))
+	return strings.TrimSpace(base64.StdEncoding.EncodeToString(h.Sum(nil)))
+}
+
+func quotePlus(s string) string {
+	return strings.ReplaceAll(url.QueryEscape(s), "%20", "+")
 }
 
 func buildMockMoldConsoleURL() string {
