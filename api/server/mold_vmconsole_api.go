@@ -1,11 +1,17 @@
 package server
 
 import (
+	"crypto/hmac"
+	"crypto/sha1"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/skydive-project/skydive/common"
@@ -46,7 +52,7 @@ func getMoldVMConsoleURL(nodeID, vmID, instanceName, mock string) (string, error
 		return "", err
 	}
 
-	return requestMoldConsoleURL(nodeID, resolvedVMID, mock)
+	return requestMoldConsoleURL(resolvedVMID, mock)
 }
 
 func resolveVMID(nodeID, vmID, instanceName string) (string, error) {
@@ -80,41 +86,57 @@ func resolveVMID(nodeID, vmID, instanceName string) (string, error) {
 	return resolvedVMID, nil
 }
 
-func requestMoldConsoleURL(nodeID, vmID, mock string) (string, error) {
-	endpoint := common.GetMoldConsoleAPIEndpoint()
-	if endpoint == "" {
-		return "", fmt.Errorf("mold.console.apiEndpoint is empty")
+func requestMoldConsoleURL(vmID, mock string) (string, error) {
+	if mock == "true" && common.IsMoldConsoleMockAllowed() {
+		return buildMockMoldConsoleURL(), nil
 	}
 
-	baseURL, err := url.Parse(endpoint)
+	apiCfg := common.GetMoldAPIConfig()
+	if apiCfg.Endpoint == "" {
+		return "", fmt.Errorf("mold.api.endpoint is empty")
+	}
+
+	apiKey, secretKey, err := common.ReadMoldAPIKeys()
 	if err != nil {
-		return "", fmt.Errorf("invalid mold console api endpoint")
+		return "", fmt.Errorf("failed to load mold api keys")
+	}
+
+	baseURL, err := url.Parse(apiCfg.Endpoint)
+	if err != nil {
+		return "", fmt.Errorf("invalid mold api endpoint")
 	}
 
 	params := baseURL.Query()
-	params.Set("vmId", vmID)
-	if nodeID != "" {
-		params.Set("nodeId", nodeID)
-	}
-	if mock == "true" {
-		params.Set("mock", "true")
-	}
+	params.Set("command", apiCfg.Command)
+	params.Set("response", "json")
+	params.Set("apikey", apiKey)
+	params.Set("id", vmID)
+	params.Set("virtualmachineid", vmID)
+	params.Set("vmid", vmID)
+
+	signature := buildMoldAPISignature(params, secretKey)
+	params.Set("signature", signature)
 	baseURL.RawQuery = params.Encode()
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
+		},
+	}
 	resp, err := client.Get(baseURL.String())
 	if err != nil {
-		return "", fmt.Errorf("failed to call mold console api")
+		return "", fmt.Errorf("failed to call mold api")
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("mold console api returned status %d", resp.StatusCode)
+		return "", fmt.Errorf("mold api returned status %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("failed to read mold console api response")
+		return "", fmt.Errorf("failed to read mold api response")
 	}
 
 	consoleURL, err := parseMoldConsoleURL(body)
@@ -136,22 +158,78 @@ func parseMoldConsoleURL(body []byte) (string, error) {
 		return simpleResponse.URL, nil
 	}
 
-	var legacyResponse map[string]interface{}
-	if err := json.Unmarshal(body, &legacyResponse); err != nil {
-		return "", fmt.Errorf("failed to parse mold console api response")
+	var payload interface{}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return "", fmt.Errorf("failed to parse mold api response")
 	}
-	for _, value := range legacyResponse {
-		obj, ok := value.(map[string]interface{})
-		if !ok {
+	if found := findConsoleURL(payload); found != "" {
+		return found, nil
+	}
+	return "", fmt.Errorf("console url not found in mold api response")
+}
+
+func buildMoldAPISignature(params url.Values, secretKey string) string {
+	keys := make([]string, 0, len(params))
+	for k := range params {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		return strings.ToLower(keys[i]) < strings.ToLower(keys[j])
+	})
+
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		values := params[k]
+		if len(values) == 0 {
 			continue
 		}
-		if urlValue, ok := obj["url"]; ok {
-			if s, ok := urlValue.(string); ok && s != "" {
-				return s, nil
+		key := strings.ToLower(k)
+		value := strings.ToLower(values[0])
+		parts = append(parts, fmt.Sprintf("%s=%s", key, moldEscape(value)))
+	}
+
+	toSign := strings.Join(parts, "&")
+	h := hmac.New(sha1.New, []byte(secretKey))
+	_, _ = h.Write([]byte(toSign))
+	return base64.StdEncoding.EncodeToString(h.Sum(nil))
+}
+
+func moldEscape(s string) string {
+	escaped := url.QueryEscape(s)
+	escaped = strings.ReplaceAll(escaped, "+", "%20")
+	escaped = strings.ReplaceAll(escaped, "*", "%2A")
+	return strings.ReplaceAll(escaped, "%7E", "~")
+}
+
+func buildMockMoldConsoleURL() string {
+	return "http://127.0.0.1/resource/noVNC/vnc.html?autoconnect=true&show_dot=true&port=8080&token=mock"
+}
+
+func findConsoleURL(v interface{}) string {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		for k, vv := range t {
+			if strings.EqualFold(k, "url") || strings.Contains(strings.ToLower(k), "consoleproxyurl") {
+				if s, ok := vv.(string); ok && s != "" {
+					return s
+				}
+			}
+			if s := findConsoleURL(vv); s != "" {
+				return s
 			}
 		}
+	case []interface{}:
+		for _, item := range t {
+			if s := findConsoleURL(item); s != "" {
+				return s
+			}
+		}
+	case string:
+		if strings.Contains(t, "/resource/noVNC/") || strings.Contains(strings.ToLower(t), "vnc.html") {
+			return t
+		}
 	}
-	return "", fmt.Errorf("console url not found in mold console api response")
+	return ""
 }
 
 func RegisterMoldVMConsoleAPI(httpServer *shttp.Server) {

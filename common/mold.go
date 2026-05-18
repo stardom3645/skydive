@@ -19,12 +19,45 @@ type MoldDBConfig struct {
 	PasswordFile string
 }
 
+type MoldAPIConfig struct {
+	Endpoint      string
+	Command       string
+	APIKeyFile    string
+	SecretKeyFile string
+}
+
 func IsMoldConsoleEnabled() bool {
 	return config.GetBool("mold.console.enabled")
 }
 
+func IsMoldConsoleMockAllowed() bool {
+	return config.GetBool("mold.console.allowMock")
+}
+
 func GetMoldConsoleAPIEndpoint() string {
 	return config.GetString("mold.console.apiEndpoint")
+}
+
+func GetMoldAPIConfig() MoldAPIConfig {
+	return MoldAPIConfig{
+		Endpoint:      config.GetString("mold.api.endpoint"),
+		Command:       config.GetString("mold.api.command"),
+		APIKeyFile:    config.GetString("mold.api.apiKeyFile"),
+		SecretKeyFile: config.GetString("mold.api.secretKeyFile"),
+	}
+}
+
+func ReadMoldAPIKeys() (string, string, error) {
+	apiCfg := GetMoldAPIConfig()
+	apiKey, err := readSecretFile(apiCfg.APIKeyFile, "mold.api.apiKeyFile")
+	if err != nil {
+		return "", "", err
+	}
+	secretKey, err := readSecretFile(apiCfg.SecretKeyFile, "mold.api.secretKeyFile")
+	if err != nil {
+		return "", "", err
+	}
+	return apiKey, secretKey, nil
 }
 
 func GetMoldDBConfig() MoldDBConfig {
@@ -39,7 +72,7 @@ func GetMoldDBConfig() MoldDBConfig {
 
 func OpenMoldDB() (*sql.DB, error) {
 	dbCfg := GetMoldDBConfig()
-	password, err := readPasswordFile(dbCfg.PasswordFile)
+	password, err := readSecretFile(dbCfg.PasswordFile, "mold.db.passwordFile")
 	if err != nil {
 		return nil, err
 	}
@@ -104,9 +137,9 @@ func ResolveVMIDFromInstanceName(instanceName string) (string, error) {
 	return vmID, nil
 }
 
-func readPasswordFile(path string) (string, error) {
+func readSecretFile(path, keyName string) (string, error) {
 	if path == "" {
-		return "", fmt.Errorf("mold.db.passwordFile is empty")
+		return "", fmt.Errorf("%s is empty", keyName)
 	}
 
 	data, err := os.ReadFile(path)
@@ -116,7 +149,7 @@ func readPasswordFile(path string) (string, error) {
 
 	password := strings.TrimSpace(string(data))
 	if password == "" {
-		return "", fmt.Errorf("mold db password is empty")
+		return "", fmt.Errorf("secret file %s is empty", keyName)
 	}
 
 	return password, nil

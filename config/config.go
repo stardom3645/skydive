@@ -190,6 +190,11 @@ func init() {
 
 	cfg.SetDefault("mold.console.enabled", false)
 	cfg.SetDefault("mold.console.apiEndpoint", "")
+	cfg.SetDefault("mold.console.allowMock", false)
+	cfg.SetDefault("mold.api.endpoint", "http://127.0.0.1:8080/client/api")
+	cfg.SetDefault("mold.api.command", "getVirtualMachineConsoleProxyUrl")
+	cfg.SetDefault("mold.api.apiKeyFile", "/etc/skydive/secrets/mold-api-key")
+	cfg.SetDefault("mold.api.secretKeyFile", "/etc/skydive/secrets/mold-secret-key")
 	cfg.SetDefault("mold.db.host", "127.0.0.1")
 	cfg.SetDefault("mold.db.port", 3306)
 	cfg.SetDefault("mold.db.name", "cloud")
