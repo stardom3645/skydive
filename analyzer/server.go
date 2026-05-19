@@ -366,6 +366,7 @@ func NewServerFromConfig() (*Server, error) {
 
 	// DB 캐시 로딩
 	common.LoadVmNameMapFromCloudstack()
+	common.StartVmNameMapAutoRefresh(time.Duration(config.GetInt("mold.vmNameMap.refreshInterval")) * time.Second)
 
 	// API 등록
 	api.RegisterVmNameMapAPI(httpServer, common.GetVmNameMap)

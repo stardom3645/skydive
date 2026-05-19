@@ -3,6 +3,7 @@ package common
 import (
 	"log"
 	"sync"
+	"time"
 )
 
 var (
@@ -50,4 +51,18 @@ func GetVmNameMap() map[string]string {
 		copy[k] = v
 	}
 	return copy
+}
+
+func StartVmNameMapAutoRefresh(interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for range ticker.C {
+			LoadVmNameMapFromCloudstack()
+		}
+	}()
 }
