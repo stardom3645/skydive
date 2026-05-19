@@ -38,7 +38,7 @@ func LoadVmNameMapFromCloudstack() {
 	vmNameMap = temp
 	vmNameMapLock.Unlock()
 
-	log.Printf("Mold VM 이름 %d개 로딩됨", len(temp))
+	정
 }
 
 func GetVmNameMap() map[string]string {
