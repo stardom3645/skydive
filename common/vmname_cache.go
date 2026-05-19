@@ -37,8 +37,6 @@ func LoadVmNameMapFromCloudstack() {
 	vmNameMapLock.Lock()
 	vmNameMap = temp
 	vmNameMapLock.Unlock()
-
-	정
 }
 
 func GetVmNameMap() map[string]string {
