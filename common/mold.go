@@ -2,6 +2,7 @@ package common
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -24,6 +25,36 @@ type MoldAPIConfig struct {
 	Command       string
 	APIKeyFile    string
 	SecretKeyFile string
+}
+
+type SecretFileErrorReason string
+
+const (
+	SecretFileMissing SecretFileErrorReason = "missing"
+	SecretFileRead    SecretFileErrorReason = "read"
+	SecretFileEmpty   SecretFileErrorReason = "empty"
+)
+
+type SecretFileError struct {
+	KeyName string
+	Path    string
+	Reason  SecretFileErrorReason
+	Err     error
+}
+
+func (e *SecretFileError) Error() string {
+	switch e.Reason {
+	case SecretFileMissing:
+		return fmt.Sprintf("%s is empty", e.KeyName)
+	case SecretFileEmpty:
+		return fmt.Sprintf("secret file %s is empty", e.KeyName)
+	default:
+		return fmt.Sprintf("failed to read secret file %s", e.KeyName)
+	}
+}
+
+func (e *SecretFileError) Unwrap() error {
+	return e.Err
 }
 
 func IsMoldConsoleEnabled() bool {
@@ -139,17 +170,38 @@ func ResolveVMIDFromInstanceName(instanceName string) (string, error) {
 
 func readSecretFile(path, keyName string) (string, error) {
 	if path == "" {
-		return "", fmt.Errorf("%s is empty", keyName)
+		return "", &SecretFileError{
+			KeyName: keyName,
+			Path:    path,
+			Reason:  SecretFileMissing,
+		}
 	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", err
+		if errors.Is(err, os.ErrNotExist) {
+			return "", &SecretFileError{
+				KeyName: keyName,
+				Path:    path,
+				Reason:  SecretFileMissing,
+				Err:     err,
+			}
+		}
+		return "", &SecretFileError{
+			KeyName: keyName,
+			Path:    path,
+			Reason:  SecretFileRead,
+			Err:     err,
+		}
 	}
 
 	password := strings.TrimSpace(string(data))
 	if password == "" {
-		return "", fmt.Errorf("secret file %s is empty", keyName)
+		return "", &SecretFileError{
+			KeyName: keyName,
+			Path:    path,
+			Reason:  SecretFileEmpty,
+		}
 	}
 
 	return password, nil
