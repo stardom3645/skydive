@@ -367,9 +367,12 @@ func NewServerFromConfig() (*Server, error) {
 	// DB 캐시 로딩
 	common.LoadVmNameMapFromCloudstack()
 	common.StartVmNameMapAutoRefresh(time.Duration(config.GetInt("mold.vmNameMap.refreshInterval")) * time.Second)
+	common.LoadVMNetworkMapFromCloudstack()
+	common.StartVMNetworkMapAutoRefresh(time.Duration(config.GetInt("mold.vmNameMap.refreshInterval")) * time.Second)
 
 	// API 등록
 	api.RegisterVmNameMapAPI(httpServer, common.GetVmNameMap)
+	api.RegisterVMNetworkMapAPI(httpServer, common.GetVMNetworkMap)
 	api.RegisterMoldVMConsoleAPI(httpServer)
 
 	if err := s.loadStaticWorkflows(); err != nil {
