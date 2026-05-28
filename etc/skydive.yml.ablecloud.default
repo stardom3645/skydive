@@ -17,7 +17,6 @@ mold:
     allowMock: false
   api:
     endpoint: "http://ccvm:8080/client/api"
-    command: "createConsoleEndpoint"
     apiKeyFile: "/usr/share/ablestack/ablestack-netdive/secrets/mold-api-key"
     secretKeyFile: "/usr/share/ablestack/ablestack-netdive/secrets/mold-secret-key"
   db:

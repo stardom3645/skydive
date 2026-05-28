@@ -22,7 +22,6 @@ type MoldDBConfig struct {
 
 type MoldAPIConfig struct {
 	Endpoint      string
-	Command       string
 	APIKeyFile    string
 	SecretKeyFile string
 }
@@ -72,7 +71,6 @@ func GetMoldConsoleAPIEndpoint() string {
 func GetMoldAPIConfig() MoldAPIConfig {
 	return MoldAPIConfig{
 		Endpoint:      config.GetString("mold.api.endpoint"),
-		Command:       config.GetString("mold.api.command"),
 		APIKeyFile:    config.GetString("mold.api.apiKeyFile"),
 		SecretKeyFile: config.GetString("mold.api.secretKeyFile"),
 	}

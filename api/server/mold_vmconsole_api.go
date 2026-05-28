@@ -24,6 +24,8 @@ type moldVMConsoleResponse struct {
 	URL string `json:"url"`
 }
 
+const moldConsoleCommand = "createConsoleEndpoint"
+
 type vmConsoleAPIError struct {
 	StatusCode int
 	Message    string
@@ -183,8 +185,8 @@ func requestMoldConsoleURL(vmID, mock string) (string, error) {
 		return "", err
 	}
 
-	if url, _, err := callMoldAPI(client, baseURL, apiCfg.Command, apiKey, secretKey, []apiParam{
-		{Key: "command", Value: apiCfg.Command},
+	if url, _, err := callMoldAPI(client, baseURL, moldConsoleCommand, apiKey, secretKey, []apiParam{
+		{Key: "command", Value: moldConsoleCommand},
 		{Key: "response", Value: "json"},
 		{Key: "apikey", Value: apiKey},
 		{Key: "virtualmachineid", Value: vmID},
