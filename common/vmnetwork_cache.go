@@ -14,8 +14,9 @@ type VMNetworkInfo struct {
 }
 
 var (
-	vmNetworkMap     = make(map[string][]VMNetworkInfo)
-	vmNetworkMapLock = sync.RWMutex{}
+	vmNetworkMap      = make(map[string][]VMNetworkInfo)
+	vmNetworkMapLock  = sync.RWMutex{}
+	vmNetworkLastLoad time.Time
 )
 
 func LoadVMNetworkMapFromCloudstack() {
@@ -64,7 +65,22 @@ func LoadVMNetworkMapFromCloudstack() {
 
 	vmNetworkMapLock.Lock()
 	vmNetworkMap = temp
+	vmNetworkLastLoad = time.Now()
 	vmNetworkMapLock.Unlock()
+}
+
+func EnsureVMNetworkMapFresh(maxAge time.Duration) {
+	if maxAge <= 0 {
+		return
+	}
+
+	vmNetworkMapLock.RLock()
+	last := vmNetworkLastLoad
+	vmNetworkMapLock.RUnlock()
+
+	if last.IsZero() || time.Since(last) > maxAge {
+		LoadVMNetworkMapFromCloudstack()
+	}
 }
 
 func GetVMNetworkMap() map[string][]VMNetworkInfo {

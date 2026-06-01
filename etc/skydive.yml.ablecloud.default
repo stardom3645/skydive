@@ -12,6 +12,8 @@ agent:
       - libvirt
 
 mold:
+  vmNetworkMap:
+    refreshInterval: 10
   console:
     enabled: true
     allowMock: false
