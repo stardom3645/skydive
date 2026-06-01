@@ -368,11 +368,12 @@ func NewServerFromConfig() (*Server, error) {
 	common.LoadVmNameMapFromCloudstack()
 	common.StartVmNameMapAutoRefresh(time.Duration(config.GetInt("mold.vmNameMap.refreshInterval")) * time.Second)
 	common.LoadVMNetworkMapFromCloudstack()
-	common.StartVMNetworkMapAutoRefresh(time.Duration(config.GetInt("mold.vmNetworkMap.refreshInterval")) * time.Second)
+	vmNetworkRefreshInterval := time.Duration(config.GetInt("mold.vmNetworkMap.refreshInterval")) * time.Second
+	common.StartVMNetworkMapAutoRefresh(vmNetworkRefreshInterval)
 
 	// API 등록
 	api.RegisterVmNameMapAPI(httpServer, common.GetVmNameMap)
-	api.RegisterVMNetworkMapAPI(httpServer, common.GetVMNetworkMap)
+	api.RegisterVMNetworkMapAPI(httpServer, common.GetVMNetworkMap, vmNetworkRefreshInterval)
 	api.RegisterMoldVMConsoleAPI(httpServer)
 
 	if err := s.loadStaticWorkflows(); err != nil {

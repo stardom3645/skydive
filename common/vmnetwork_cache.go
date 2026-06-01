@@ -96,6 +96,12 @@ func GetVMNetworkMap() map[string][]VMNetworkInfo {
 	return cp
 }
 
+func GetVMNetworkMapLastLoad() time.Time {
+	vmNetworkMapLock.RLock()
+	defer vmNetworkMapLock.RUnlock()
+	return vmNetworkLastLoad
+}
+
 func StartVMNetworkMapAutoRefresh(interval time.Duration) {
 	if interval <= 0 {
 		return
