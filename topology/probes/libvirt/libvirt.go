@@ -1,3 +1,4 @@
+//go:build linux
 // +build linux
 
 /*
@@ -51,6 +52,8 @@ type Probe struct {
 	uri          string                // uri of the libvirt connection
 	tunProcessor *graph.Processor      // metadata indexer for regular interfaces
 }
+
+const libvirtDomainResyncInterval = 10 * time.Second
 
 // monitor abstracts a libvirt monitor
 type monitor interface {
@@ -430,6 +433,32 @@ func (probe *Probe) Do(ctx context.Context, wg *sync.WaitGroup) error {
 	}
 	probe.conn = conn
 
+	if err := probe.syncAllDomains(); err != nil {
+		return err
+	}
+
+	// Keep NIC metadata synchronized even when libvirt backend misses hotplug events.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(libvirtDomainResyncInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := probe.syncAllDomains(); err != nil {
+					probe.Ctx.Logger.Debugf("libvirt periodic resync failed: %v", err)
+				}
+			}
+		}
+	}()
+
+	return nil
+}
+
+func (probe *Probe) syncAllDomains() error {
 	domains, err := probe.conn.AllDomains()
 	if err != nil {
 		return err
@@ -442,7 +471,6 @@ func (probe *Probe) Do(ctx context.Context, wg *sync.WaitGroup) error {
 		interfaces, hostdevs := probe.getDomainInterfaces(domain, domainNode, "")
 		probe.registerInterfaces(interfaces, hostdevs)
 	}
-
 	return nil
 }
 
