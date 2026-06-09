@@ -56,6 +56,7 @@ import (
 	"github.com/skydive-project/skydive/topology"
 	usertopology "github.com/skydive-project/skydive/topology/enhancers"
 	"github.com/skydive-project/skydive/topology/probes/blockdev"
+	"github.com/skydive-project/skydive/topology/probes/k8s"
 	"github.com/skydive-project/skydive/ui"
 	"github.com/skydive-project/skydive/validator"
 	"github.com/skydive-project/skydive/version"
@@ -105,6 +106,46 @@ func (s *Server) GetStatus() interface{} {
 		Alerts:      hubStatus.Alerts,
 		Captures:    hub.ElectionStatus{IsMaster: s.onDemandClient.IsMaster()},
 		Probes:      s.probeBundle.GetStatus(),
+	}
+}
+
+func startMoldKubernetesProbe(g *graph.Graph, probeBundle *probe.Bundle) func() error {
+	return func() error {
+		if probeBundle.GetHandler("k8s") != nil {
+			logging.GetLogger().Info("Mold Kubernetes collection already running")
+			return nil
+		}
+		if k8s.ShouldSkipK8sProbe() {
+			return fmt.Errorf("Kubernetes collection is not ready: kubeconfig or selection state is missing")
+		}
+		handler, err := k8s.NewK8sProbe(g)
+		if err != nil {
+			logging.GetLogger().Errorf("Failed to create Mold Kubernetes probe: %s", err)
+			return err
+		}
+		if handler == nil {
+			return fmt.Errorf("Kubernetes probe was skipped")
+		}
+		if err := handler.Start(); err != nil {
+			logging.GetLogger().Errorf("Failed to start Mold Kubernetes probe: %s", err)
+			return err
+		}
+		probeBundle.AddHandler("k8s", handler)
+		logging.GetLogger().Info("Mold Kubernetes collection probe started")
+		return nil
+	}
+}
+
+func stopMoldKubernetesProbe(probeBundle *probe.Bundle) func() {
+	return func() {
+		probeBundle.RemoveHandler("k8s")
+		logging.GetLogger().Info("Mold Kubernetes collection probe stopped")
+	}
+}
+
+func isMoldKubernetesProbeRunning(probeBundle *probe.Bundle) func() bool {
+	return func() bool {
+		return probeBundle.GetHandler("k8s") != nil
 	}
 }
 
@@ -375,7 +416,7 @@ func NewServerFromConfig() (*Server, error) {
 	api.RegisterVmNameMapAPI(httpServer, common.GetVmNameMap)
 	api.RegisterVMNetworkMapAPI(httpServer, common.GetVMNetworkMap, vmNetworkRefreshInterval)
 	api.RegisterMoldVMConsoleAPI(httpServer)
-	api.RegisterMoldKubernetesAPI(httpServer)
+	api.RegisterMoldKubernetesAPI(httpServer, startMoldKubernetesProbe(g, probeBundle), stopMoldKubernetesProbe(probeBundle), isMoldKubernetesProbeRunning(probeBundle))
 
 	if err := s.loadStaticWorkflows(); err != nil {
 		return nil, err

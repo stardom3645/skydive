@@ -32,6 +32,7 @@ type moldKubernetesCluster struct {
 	State             string `json:"state"`
 	APIServer         string `json:"apiServer"`
 	CollectionEnabled bool   `json:"collectionEnabled"`
+	CollectionRunning bool   `json:"collectionRunning"`
 }
 
 type moldKubernetesSelection struct {
@@ -47,6 +48,7 @@ type moldKubernetesClustersResponse struct {
 	SelectedID     string                  `json:"selectedId,omitempty"`
 	KubeconfigPath string                  `json:"kubeconfigPath"`
 	RestartNeeded  bool                    `json:"restartNeeded"`
+	ProbeRunning   bool                    `json:"probeRunning"`
 }
 
 type moldKubernetesSelectRequest struct {
@@ -57,9 +59,10 @@ type moldKubernetesStatusResponse struct {
 	OK             bool   `json:"ok"`
 	Message        string `json:"message,omitempty"`
 	KubeconfigPath string `json:"kubeconfigPath,omitempty"`
+	ProbeRunning   bool   `json:"probeRunning"`
 }
 
-func handleMoldKubernetesClusters(w http.ResponseWriter, r *http.Request) {
+func handleMoldKubernetesClusters(w http.ResponseWriter, r *http.Request, isProbeRunning moldKubernetesProbeStatus) {
 	clusters, err := listMoldKubernetesClusters()
 	if err != nil {
 		writeMoldKubernetesError(w, err)
@@ -71,19 +74,29 @@ func handleMoldKubernetesClusters(w http.ResponseWriter, r *http.Request) {
 	if selection.Enabled {
 		selectedID = selection.ClusterID
 	}
+	probeRunning := false
+	if isProbeRunning != nil {
+		probeRunning = isProbeRunning()
+	}
 	for i := range clusters {
 		clusters[i].CollectionEnabled = selection.Enabled && clusters[i].ID == selection.ClusterID
+		clusters[i].CollectionRunning = clusters[i].CollectionEnabled && probeRunning
 	}
 
 	writeJSON(w, moldKubernetesClustersResponse{
 		Clusters:       clusters,
 		SelectedID:     selectedID,
 		KubeconfigPath: moldKubernetesKubeconfigPath(),
-		RestartNeeded:  true,
+		RestartNeeded:  false,
+		ProbeRunning:   probeRunning,
 	})
 }
 
-func handleMoldKubernetesSelect(w http.ResponseWriter, r *http.Request) {
+type moldKubernetesProbeStarter func() error
+type moldKubernetesProbeStopper func()
+type moldKubernetesProbeStatus func() bool
+
+func handleMoldKubernetesSelect(w http.ResponseWriter, r *http.Request, startProbe moldKubernetesProbeStarter) {
 	var req moldKubernetesSelectRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
@@ -134,20 +147,36 @@ func handleMoldKubernetesSelect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	message := "kubeconfig saved. k8s probe started."
+	probeRunning := false
+	if startProbe != nil {
+		if err := startProbe(); err != nil {
+			message = "kubeconfig saved, but k8s probe start failed. check analyzer logs."
+		} else {
+			probeRunning = true
+		}
+	} else {
+		message = "kubeconfig saved. restart analyzer to apply k8s probe if it is not running."
+	}
+
 	writeJSON(w, moldKubernetesStatusResponse{
-		OK:             true,
-		Message:        "kubeconfig saved. restart analyzer to apply k8s probe if it is not running.",
+		OK:             probeRunning || startProbe == nil,
+		Message:        message,
 		KubeconfigPath: path,
+		ProbeRunning:   probeRunning,
 	})
 }
 
-func handleMoldKubernetesDisable(w http.ResponseWriter, r *http.Request) {
+func handleMoldKubernetesDisable(w http.ResponseWriter, r *http.Request, stopProbe moldKubernetesProbeStopper) {
 	selection := moldKubernetesSelection{Enabled: false, UpdatedAt: time.Now().UTC()}
 	if err := writeMoldKubernetesSelection(selection); err != nil {
 		http.Error(w, "failed to save collection state", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, moldKubernetesStatusResponse{OK: true, Message: "kubernetes collection disabled. restart analyzer to stop an already running k8s probe."})
+	if stopProbe != nil {
+		stopProbe()
+	}
+	writeJSON(w, moldKubernetesStatusResponse{OK: true, Message: "kubernetes collection disabled."})
 }
 
 func handleMoldKubernetesTest(w http.ResponseWriter, r *http.Request) {
@@ -340,11 +369,11 @@ func firstNonEmpty(values ...string) string {
 }
 
 func moldKubernetesKubeconfigPath() string {
-	path := config.GetString("mold.kubernetes.kubeconfigPath")
+	path := config.GetString("analyzer.topology.k8s.config_file")
 	if path != "" {
 		return path
 	}
-	return config.GetString("analyzer.topology.k8s.config_file")
+	return config.GetString("mold.kubernetes.kubeconfigPath")
 }
 
 func moldKubernetesStatePath() string {
@@ -408,9 +437,15 @@ func writeJSON(w http.ResponseWriter, payload interface{}) {
 	}
 }
 
-func RegisterMoldKubernetesAPI(httpServer *shttp.Server) {
-	httpServer.Router.HandleFunc("/api/mold/kubernetes-clusters", handleMoldKubernetesClusters).Methods("GET")
-	httpServer.Router.HandleFunc("/api/mold/kubernetes-clusters/select", handleMoldKubernetesSelect).Methods("POST")
-	httpServer.Router.HandleFunc("/api/mold/kubernetes-clusters/disable", handleMoldKubernetesDisable).Methods("POST")
+func RegisterMoldKubernetesAPI(httpServer *shttp.Server, startProbe moldKubernetesProbeStarter, stopProbe moldKubernetesProbeStopper, isProbeRunning moldKubernetesProbeStatus) {
+	httpServer.Router.HandleFunc("/api/mold/kubernetes-clusters", func(w http.ResponseWriter, r *http.Request) {
+		handleMoldKubernetesClusters(w, r, isProbeRunning)
+	}).Methods("GET")
+	httpServer.Router.HandleFunc("/api/mold/kubernetes-clusters/select", func(w http.ResponseWriter, r *http.Request) {
+		handleMoldKubernetesSelect(w, r, startProbe)
+	}).Methods("POST")
+	httpServer.Router.HandleFunc("/api/mold/kubernetes-clusters/disable", func(w http.ResponseWriter, r *http.Request) {
+		handleMoldKubernetesDisable(w, r, stopProbe)
+	}).Methods("POST")
 	httpServer.Router.HandleFunc("/api/mold/kubernetes-clusters/test", handleMoldKubernetesTest).Methods("POST")
 }
