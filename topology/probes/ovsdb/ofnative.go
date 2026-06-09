@@ -497,12 +497,6 @@ func (probe *ofProbe) handleFlowStats(xid uint32, rule *ofRule, actions, writeAc
 		lastUpdateMetric = currMetric.Sub(prevMetric.(*topology.InterfaceMetric)).(*topology.InterfaceMetric)
 	}
 
-	// nothing changed since last update
-	if lastUpdateMetric != nil && lastUpdateMetric.IsZero() {
-		probe.Ctx.Graph.Unlock()
-		return
-	}
-
 	tr.AddMetadata("Metric", currMetric)
 	if lastUpdateMetric != nil {
 		lastUpdateMetric.Start = graph.Time(last).UnixMilli()

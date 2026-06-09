@@ -1,3 +1,4 @@
+//go:build linux
 // +build linux
 
 /*
@@ -1000,7 +1001,7 @@ func (u *Probe) updateIntfMetric(now, last time.Time) {
 	for index, node := range u.cloneLinkNodes() {
 		if link, err := u.handle.LinkByIndex(index); err == nil {
 			currMetric := newInterfaceMetricsFromNetlink(link)
-			if currMetric == nil || currMetric.IsZero() {
+			if currMetric == nil {
 				continue
 			}
 			currMetric.Last = graph.Time(now).UnixMilli()
@@ -1013,12 +1014,6 @@ func (u *Probe) updateIntfMetric(now, last time.Time) {
 			prevMetric, err := node.GetField("Metric")
 			if err == nil {
 				lastUpdateMetric = currMetric.Sub(prevMetric.(*topology.InterfaceMetric)).(*topology.InterfaceMetric)
-			}
-
-			// nothing changed since last update
-			if lastUpdateMetric != nil && lastUpdateMetric.IsZero() {
-				u.Ctx.Graph.Unlock()
-				continue
 			}
 
 			tr.AddMetadata("Metric", currMetric)

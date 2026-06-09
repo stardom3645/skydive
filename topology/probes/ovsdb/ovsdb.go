@@ -497,8 +497,7 @@ func (o *Probe) OnOvsInterfaceAdd(monitor *ovsdb.OvsMonitor, uuid string, row *l
 
 		ovsMetadata.Metric = currMetric
 
-		// nothing changed since last update
-		if lastUpdateMetric != nil && !lastUpdateMetric.IsZero() {
+		if lastUpdateMetric != nil {
 			lastUpdateMetric.Start = prevMetric.Last
 			lastUpdateMetric.Last = now
 
