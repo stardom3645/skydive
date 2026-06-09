@@ -18,6 +18,8 @@
 package k8s
 
 import (
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -198,38 +200,54 @@ func InitSubprobes(enabled []string, subprobeHandlers map[string]SubprobeHandler
 	}
 }
 
+var k8sReflectorResourceVersionRe = regexp.MustCompile(`resourceVersion=[0-9]+`)
+var k8sDialErrorRe = regexp.MustCompile(`dial tcp ([^:]+:[0-9]+): ([^\n]+)$`)
+
+type k8sErrorRateLimiter struct {
+	period time.Duration
+	lock   sync.Mutex
+	last   map[string]time.Time
+}
+
+var k8sErrorLimiter = &k8sErrorRateLimiter{
+	period: time.Minute,
+	last:   make(map[string]time.Time),
+}
+
+func normalizeK8sReflectorError(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := strings.TrimSpace(err.Error())
+	if match := k8sDialErrorRe.FindStringSubmatch(msg); len(match) == 3 {
+		return "kubernetes apiserver " + match[1] + ": " + match[2]
+	}
+	msg = k8sReflectorResourceVersionRe.ReplaceAllString(msg, "resourceVersion=*")
+	return strings.TrimSpace(msg)
+}
+
 func logOnError(err error) {
-	logging.GetLogger().Warning(err)
-}
-
-type errorThrottle struct {
-	period   time.Duration
-	lastLock sync.RWMutex
-	last     time.Time
-}
-
-func (r *errorThrottle) onError(error) {
-	r.lastLock.RLock()
-	d := time.Since(r.last)
-	r.lastLock.RUnlock()
-
-	if d < r.period {
-		time.Sleep(r.period - d)
+	key := normalizeK8sReflectorError(err)
+	if key == "" {
+		return
 	}
 
-	r.lastLock.Lock()
-	r.last = time.Now()
-	r.lastLock.Unlock()
+	now := time.Now()
+	k8sErrorLimiter.lock.Lock()
+	last, seen := k8sErrorLimiter.last[key]
+	if seen && now.Sub(last) < k8sErrorLimiter.period {
+		k8sErrorLimiter.lock.Unlock()
+		return
+	}
+	k8sErrorLimiter.last[key] = now
+	k8sErrorLimiter.lock.Unlock()
+
+	logging.GetLogger().Warningf("%s (repeated identical Kubernetes watch errors are suppressed for %s)", key, k8sErrorLimiter.period)
 }
 
 func muteInternalErrors() {
-	throttle := errorThrottle{
-		period: time.Second,
-		last:   time.Now(),
-	}
 	runtime.ErrorHandlers = []func(error){
 		logOnError,
-		throttle.onError,
 	}
 }
 
