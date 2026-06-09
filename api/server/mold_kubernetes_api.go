@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"github.com/skydive-project/skydive/common"
 	"github.com/skydive-project/skydive/config"
 	shttp "github.com/skydive-project/skydive/graffiti/http"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 )
@@ -53,6 +55,24 @@ type moldKubernetesClustersResponse struct {
 
 type moldKubernetesSelectRequest struct {
 	ID string `json:"id"`
+}
+
+type moldKubernetesTestRequest struct {
+	ID string `json:"id"`
+}
+
+type moldKubernetesCheckResult struct {
+	Key     string `json:"key"`
+	Label   string `json:"label"`
+	OK      bool   `json:"ok"`
+	Reason  string `json:"reason,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
+type moldKubernetesTestResponse struct {
+	OK      bool                        `json:"ok"`
+	Message string                      `json:"message,omitempty"`
+	Checks  []moldKubernetesCheckResult `json:"checks"`
 }
 
 type moldKubernetesStatusResponse struct {
@@ -129,10 +149,17 @@ func handleMoldKubernetesSelect(w http.ResponseWriter, r *http.Request, startPro
 		writeMoldKubernetesError(w, err)
 		return
 	}
-	path := moldKubernetesKubeconfigPath()
-	if err := writeSecureFile(path, []byte(kubeconfig)); err != nil {
+	clusterPath := moldKubernetesClusterKubeconfigPath(req.ID)
+	if err := writeSecureFile(clusterPath, []byte(kubeconfig)); err != nil {
 		http.Error(w, "failed to save kubeconfig", http.StatusInternalServerError)
 		return
+	}
+	path := moldKubernetesKubeconfigPath()
+	if path != clusterPath {
+		if err := writeSecureFile(path, []byte(kubeconfig)); err != nil {
+			http.Error(w, "failed to save active kubeconfig", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	selection := moldKubernetesSelection{
@@ -180,24 +207,100 @@ func handleMoldKubernetesDisable(w http.ResponseWriter, r *http.Request, stopPro
 }
 
 func handleMoldKubernetesTest(w http.ResponseWriter, r *http.Request) {
-	path := moldKubernetesKubeconfigPath()
-	clientConfig, err := clientcmd.BuildConfigFromFlags("", path)
+	var req moldKubernetesTestRequest
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	checks := make([]moldKubernetesCheckResult, 0, 8)
+	addCheck := func(key, label string, ok bool, reason, message string) {
+		checks = append(checks, moldKubernetesCheckResult{Key: key, Label: label, OK: ok, Reason: reason, Message: message})
+	}
+	fail := func(key, label string, err error, message string) {
+		addCheck(key, label, false, sanitizeKubernetesTestError(err), message)
+	}
+
+	var kubeconfigData []byte
+	if strings.TrimSpace(req.ID) != "" {
+		configText, err := getMoldKubernetesConfig(req.ID)
+		if err != nil {
+			fail("kubeconfig", "kubeconfig 생성/읽기", err, "Mold에서 kubeconfig를 가져오지 못했습니다.")
+			writeJSON(w, moldKubernetesTestResponse{OK: false, Message: "connection test failed", Checks: checks})
+			return
+		}
+		kubeconfigData = []byte(configText)
+	} else {
+		path := moldKubernetesKubeconfigPath()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			fail("kubeconfig", "kubeconfig 생성/읽기", err, "저장된 kubeconfig를 읽지 못했습니다.")
+			writeJSON(w, moldKubernetesTestResponse{OK: false, Message: "connection test failed", Checks: checks})
+			return
+		}
+		kubeconfigData = data
+	}
+
+	clientConfig, err := clientcmd.RESTConfigFromKubeConfig(kubeconfigData)
 	if err != nil {
-		writeJSON(w, moldKubernetesStatusResponse{OK: false, Message: "kubeconfig load failed"})
+		fail("kubeconfig", "kubeconfig 생성/읽기", err, "kubeconfig 형식이 올바르지 않습니다.")
+		writeJSON(w, moldKubernetesTestResponse{OK: false, Message: "connection test failed", Checks: checks})
 		return
 	}
 	clientConfig.Timeout = 10 * time.Second
+	addCheck("kubeconfig", "kubeconfig 생성/읽기", true, "", "kubeconfig를 읽었습니다.")
+	addCheck("apiserver", "API Server 접근", true, "", "API Server 설정을 확인했습니다.")
+
 	clientset, err := kubernetes.NewForConfig(clientConfig)
 	if err != nil {
-		writeJSON(w, moldKubernetesStatusResponse{OK: false, Message: "kubernetes client create failed"})
+		fail("client", "API Server 접근", err, "Kubernetes client를 생성하지 못했습니다.")
+		writeJSON(w, moldKubernetesTestResponse{OK: false, Message: "connection test failed", Checks: checks})
 		return
 	}
-	version, err := clientset.Discovery().ServerVersion()
-	if err != nil {
-		writeJSON(w, moldKubernetesStatusResponse{OK: false, Message: "connection test failed"})
-		return
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if version, err := clientset.Discovery().ServerVersion(); err != nil {
+		fail("version", "/version 호출", err, "Kubernetes 버전 정보를 조회하지 못했습니다.")
+	} else {
+		addCheck("version", "/version 호출", true, "", fmt.Sprintf("%s", version.GitVersion))
 	}
-	writeJSON(w, moldKubernetesStatusResponse{OK: true, Message: fmt.Sprintf("connected: %s", version.GitVersion), KubeconfigPath: path})
+	if _, err := clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{Limit: 1}); err != nil {
+		fail("namespaces", "namespace 목록 조회", err, "namespace 목록을 조회하지 못했습니다.")
+	} else {
+		addCheck("namespaces", "namespace 목록 조회", true, "", "namespace 조회 권한을 확인했습니다.")
+	}
+	if _, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{Limit: 1}); err != nil {
+		fail("nodes", "node 목록 조회", err, "node 목록을 조회하지 못했습니다.")
+	} else {
+		addCheck("nodes", "node 목록 조회", true, "", "node 조회 권한을 확인했습니다.")
+	}
+	if _, err := clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{Limit: 1}); err != nil {
+		fail("pods", "pod 목록 조회", err, "pod 목록을 조회하지 못했습니다.")
+	} else {
+		addCheck("pods", "pod 목록 조회", true, "", "pod 조회 권한을 확인했습니다.")
+	}
+	if _, err := clientset.CoreV1().Services("").List(ctx, metav1.ListOptions{Limit: 1}); err != nil {
+		fail("services", "service 목록 조회", err, "service 목록을 조회하지 못했습니다.")
+	} else {
+		addCheck("services", "service 목록 조회", true, "", "service 조회 권한을 확인했습니다.")
+	}
+	if _, err := clientset.NetworkingV1().NetworkPolicies("").List(ctx, metav1.ListOptions{Limit: 1}); err != nil {
+		fail("networkpolicies", "networkpolicy 목록 조회", err, "networkpolicy 목록을 조회하지 못했습니다.")
+	} else {
+		addCheck("networkpolicies", "networkpolicy 목록 조회", true, "", "networkpolicy 조회 권한을 확인했습니다.")
+	}
+
+	ok := true
+	for _, check := range checks {
+		if !check.OK {
+			ok = false
+			break
+		}
+	}
+	message := "connection test succeeded"
+	if !ok {
+		message = "connection test failed"
+	}
+	writeJSON(w, moldKubernetesTestResponse{OK: ok, Message: message, Checks: checks})
 }
 
 func listMoldKubernetesClusters() ([]moldKubernetesCluster, error) {
@@ -374,6 +477,46 @@ func moldKubernetesKubeconfigPath() string {
 		return path
 	}
 	return config.GetString("mold.kubernetes.kubeconfigPath")
+}
+
+func moldKubernetesClusterKubeconfigPath(clusterID string) string {
+	basePath := moldKubernetesKubeconfigPath()
+	safeID := sanitizeKubernetesFileName(clusterID)
+	if safeID == "" {
+		safeID = "selected"
+	}
+	return filepath.Join(filepath.Dir(basePath), safeID+".kubeconfig")
+}
+
+func sanitizeKubernetesFileName(value string) string {
+	value = strings.TrimSpace(value)
+	var b strings.Builder
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('_')
+		}
+	}
+	return b.String()
+}
+
+func sanitizeKubernetesTestError(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	blocked := []string{"token", "client-key-data", "client-certificate-data", "certificate-authority-data", "authorization", "bearer"}
+	lower := strings.ToLower(msg)
+	for _, keyword := range blocked {
+		if strings.Contains(lower, keyword) {
+			return "민감정보를 포함할 수 있는 오류입니다. analyzer 로그와 kubeconfig 권한을 확인하세요."
+		}
+	}
+	if len(msg) > 220 {
+		msg = msg[:220] + "..."
+	}
+	return msg
 }
 
 func moldKubernetesStatePath() string {
