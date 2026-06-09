@@ -1,6 +1,6 @@
 '''
 Copyright (c) 2021 ABLECLOUD Co. Ltd
-이 파일은 Wall VM을 구성할 때 netdive.yml 파일을 설정하는 프로그램입니다.
+이 파일은 Wall VM을 구성할 때 netdive-agent.yml 파일을 설정하는 프로그램입니다.
 최초 작성일 : 2021. 09. 15
 '''
 
@@ -54,31 +54,31 @@ def cubeServiceConfig(cube_ip):
 
 
 # 함수명 : configYaml
-# 주요 기능 : 입력 받은 ip를 netdive.yml 파일의 analyzers에 설정
+# 주요 기능 : 입력 받은 ip를 netdive-agent.yml 파일의 analyzers에 설정
 
 
 def configYaml(ccvm):
     netdive_yml_path = '/usr/share/ablestack/ablestack-netdive/netdive/'
 
-    with open(netdive_yml_path + "netdive.yml") as f:
+    with open(netdive_yml_path + "netdive-agent.yml") as f:
         netdive_org = yaml.safe_load(f)
 
         netdive_org['analyzers'] = ccvmNetdiveConfig(ccvm)
 
-        with open(netdive_yml_path + "netdive.yml", 'w') as yaml_file:
+        with open(netdive_yml_path + "netdive-agent.yml", 'w') as yaml_file:
             yaml_file.write(
                 yaml.dump(netdive_org, default_flow_style=False))
 
 
 # 함수명 : SendCommandToHost
-# 주요 기능 : 입력 받은 cube ip의 주소로 netdive.yml 파일을 전송하고 service를 재시작 합니다.
+# 주요 기능 : 입력 받은 cube ip의 주소로 netdive-agent.yml 파일을 전송하고 service를 재시작 합니다.
 
 def SendCommandToHost(cube):
     netdive_yml_path = '/usr/share/ablestack/ablestack-netdive/netdive/'
 
     for i in range(len(cube)):
         stringCube = ''.join(cubeServiceConfig(cube)[i])
-        sh.scp(netdive_yml_path + "netdive.yml", "root@" + stringCube + ":" + netdive_yml_path)
+        sh.scp(netdive_yml_path + "netdive-agent.yml", "root@" + stringCube + ":" + netdive_yml_path)
         os.system("ssh root@" + stringCube + " 'systemctl restart netdive-agent.service'")
 
 

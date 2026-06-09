@@ -100,12 +100,23 @@ func moldKubernetesSelectionEnabled() bool {
 	return state.Enabled
 }
 
+func shouldSkipMissingKubeconfig(kubeconfigPath string) bool {
+	if kubeconfigPath == "" {
+		return false
+	}
+	_, err := os.Stat(kubeconfigPath)
+	return os.IsNotExist(err)
+}
+
 // NewK8sProbe returns a new Kubernetes probe
 func NewK8sProbe(g *graph.Graph) (*K8sProbe, error) {
 	if !moldKubernetesSelectionEnabled() {
 		return nil, nil
 	}
 	kubeconfigPath := config.GetString("analyzer.topology.k8s.config_file")
+	if shouldSkipMissingKubeconfig(kubeconfigPath) {
+		return nil, nil
+	}
 	enabledSubprobes := config.GetStringSlice("analyzer.topology.k8s.probes")
 
 	clientconfig, kubeconfig, err := NewConfig(kubeconfigPath)

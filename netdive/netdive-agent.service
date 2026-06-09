@@ -10,7 +10,7 @@ Restart=on-failure
 #Change this line if you download ther
 
 ExecStart=/usr/share/ablestack/ablestack-netdive/netdive/ablestack-netdive agent \
---conf /usr/share/ablestack/ablestack-netdive/netdive/netdive.yml
+--conf /usr/share/ablestack/ablestack-netdive/netdive/netdive-agent.yml
 
 [Install]
 WantedBy=multi-user.target

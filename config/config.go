@@ -203,7 +203,7 @@ func init() {
 	cfg.SetDefault("mold.vmNetworkMap.refreshInterval", 10)
 	cfg.SetDefault("mold.kubernetes.kubeconfigPath", "/usr/share/ablestack/ablestack-netdive/kubeconfigs/selected.kubeconfig")
 	cfg.SetDefault("mold.kubernetes.stateFile", "/usr/share/ablestack/ablestack-netdive/kubeconfigs/selected-cluster.json")
-	cfg.SetDefault("mold.kubernetes.enforceSelection", false)
+	cfg.SetDefault("mold.kubernetes.enforceSelection", true)
 	cfg.SetDefault("analyzer.topology.k8s.probes", []string{"cluster", "namespace", "node", "pod", "service", "deployment", "daemonset", "statefulset", "ingress", "networkpolicy"})
 
 	cfg.SetDefault("ovs.ovsdb", "unix:///var/run/openvswitch/db.sock")
