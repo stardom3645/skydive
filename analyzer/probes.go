@@ -122,6 +122,9 @@ func NewTopologyProbeBundleFromConfig(g *graph.Graph) (*probe.Bundle, error) {
 		case "ovnk8s":
 			handler, err = ovnk8s.NewProbe(g)
 		case "k8s":
+			if k8s.ShouldSkipK8sProbe() {
+				continue
+			}
 			handler, err = k8s.NewK8sProbe(g)
 		case "istio":
 			handler, err = istio.NewIstioProbe(g)

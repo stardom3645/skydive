@@ -1,0 +1,43 @@
+# Netdive Analyzer config file for ABLESTACK
+# Netdive Analyzer 전용 설정 파일입니다.
+# 배포 대상: ccvm 템플릿
+# 수정일 : 2026. 03. 10
+
+analyzer:
+  listen: 0.0.0.0:8082
+  topology:
+    probes:
+      - k8s
+    k8s:
+      config_file: "/usr/share/ablestack/ablestack-netdive/kubeconfigs/selected.kubeconfig"
+      probes:
+        - cluster
+        - namespace
+        - node
+        - pod
+        - service
+        - deployment
+        - daemonset
+        - statefulset
+        - ingress
+        - networkpolicy
+
+mold:
+  vmNetworkMap:
+    refreshInterval: 10
+  console:
+    enabled: true
+  kubernetes:
+    enforceSelection: true
+    kubeconfigPath: "/usr/share/ablestack/ablestack-netdive/kubeconfigs/selected.kubeconfig"
+    stateFile: "/usr/share/ablestack/ablestack-netdive/kubeconfigs/selected-cluster.json"
+  api:
+    endpoint: "http://ccvm:8080/client/api"
+    apiKeyFile: "/usr/share/ablestack/ablestack-netdive/secrets/mold-api-key"
+    secretKeyFile: "/usr/share/ablestack/ablestack-netdive/secrets/mold-secret-key"
+  db:
+    host: "127.0.0.1"
+    port: 3306
+    name: "cloud"
+    user: "cloud"
+    passwordFile: "/usr/share/ablestack/ablestack-netdive/secrets/mold-db-password"

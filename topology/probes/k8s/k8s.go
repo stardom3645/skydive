@@ -39,6 +39,9 @@ type K8sProbe struct {
 
 // Start the k8s probe
 func (p *K8sProbe) Start() error {
+	if p == nil || p.Probe == nil || p.clusterSubprobe == nil {
+		return nil
+	}
 	if err := p.clusterSubprobe.Start(); err != nil {
 		return err
 	}
@@ -108,15 +111,20 @@ func shouldSkipMissingKubeconfig(kubeconfigPath string) bool {
 	return os.IsNotExist(err)
 }
 
+// ShouldSkipK8sProbe returns true when Mold-managed Kubernetes collection is not selected yet.
+func ShouldSkipK8sProbe() bool {
+	if !moldKubernetesSelectionEnabled() {
+		return true
+	}
+	return shouldSkipMissingKubeconfig(config.GetString("analyzer.topology.k8s.config_file"))
+}
+
 // NewK8sProbe returns a new Kubernetes probe
 func NewK8sProbe(g *graph.Graph) (*K8sProbe, error) {
-	if !moldKubernetesSelectionEnabled() {
+	if ShouldSkipK8sProbe() {
 		return nil, nil
 	}
 	kubeconfigPath := config.GetString("analyzer.topology.k8s.config_file")
-	if shouldSkipMissingKubeconfig(kubeconfigPath) {
-		return nil, nil
-	}
 	enabledSubprobes := config.GetStringSlice("analyzer.topology.k8s.probes")
 
 	clientconfig, kubeconfig, err := NewConfig(kubeconfigPath)

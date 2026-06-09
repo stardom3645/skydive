@@ -1,0 +1,11 @@
+# Netdive Agent config file for ABLESTACK
+
+analyzers:
+  - ccvm:8082
+
+agent:
+  topology:
+    probes:
+      - socketinfo
+      - lldp
+      - libvirt
