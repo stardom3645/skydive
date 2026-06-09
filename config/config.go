@@ -201,6 +201,10 @@ func init() {
 	cfg.SetDefault("mold.db.passwordFile", "/etc/skydive/secrets/mold-db-password")
 	cfg.SetDefault("mold.vmNameMap.refreshInterval", 10)
 	cfg.SetDefault("mold.vmNetworkMap.refreshInterval", 10)
+	cfg.SetDefault("mold.kubernetes.kubeconfigPath", "/usr/share/ablestack/ablestack-netdive/kubeconfigs/selected.kubeconfig")
+	cfg.SetDefault("mold.kubernetes.stateFile", "/usr/share/ablestack/ablestack-netdive/kubeconfigs/selected-cluster.json")
+	cfg.SetDefault("mold.kubernetes.enforceSelection", false)
+	cfg.SetDefault("analyzer.topology.k8s.probes", []string{"cluster", "namespace", "node", "pod", "service", "deployment", "daemonset", "statefulset", "ingress", "networkpolicy"})
 
 	cfg.SetDefault("ovs.ovsdb", "unix:///var/run/openvswitch/db.sock")
 	cfg.SetDefault("ovs.oflow.enable", false)

@@ -375,6 +375,7 @@ func NewServerFromConfig() (*Server, error) {
 	api.RegisterVmNameMapAPI(httpServer, common.GetVmNameMap)
 	api.RegisterVMNetworkMapAPI(httpServer, common.GetVMNetworkMap, vmNetworkRefreshInterval)
 	api.RegisterMoldVMConsoleAPI(httpServer)
+	api.RegisterMoldKubernetesAPI(httpServer)
 
 	if err := s.loadStaticWorkflows(); err != nil {
 		return nil, err

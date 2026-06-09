@@ -18,7 +18,9 @@
 package k8s
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 
 	"github.com/skydive-project/skydive/config"
 	"github.com/skydive-project/skydive/graffiti/graph"
@@ -77,8 +79,32 @@ func NewConfig(kubeconfigPath string) (*rest.Config, *clientcmd.ClientConfig, er
 	return nil, nil, fmt.Errorf("Failed to load Kubernetes config: %s", err)
 }
 
+func moldKubernetesSelectionEnabled() bool {
+	if !config.GetBool("mold.kubernetes.enforceSelection") {
+		return true
+	}
+	stateFile := config.GetString("mold.kubernetes.stateFile")
+	if stateFile == "" {
+		return false
+	}
+	data, err := os.ReadFile(stateFile)
+	if err != nil {
+		return false
+	}
+	var state struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return false
+	}
+	return state.Enabled
+}
+
 // NewK8sProbe returns a new Kubernetes probe
 func NewK8sProbe(g *graph.Graph) (*K8sProbe, error) {
+	if !moldKubernetesSelectionEnabled() {
+		return nil, nil
+	}
 	kubeconfigPath := config.GetString("analyzer.topology.k8s.config_file")
 	enabledSubprobes := config.GetStringSlice("analyzer.topology.k8s.probes")
 
