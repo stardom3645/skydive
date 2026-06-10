@@ -112,6 +112,20 @@ func newTypesFilter(manager string, types ...string) *filters.Filter {
 	)
 }
 
+func CleanupK8sGraph(g *graph.Graph) {
+	if g == nil {
+		return
+	}
+
+	g.Lock()
+	defer g.Unlock()
+
+	filter := graph.NewElementFilter(filters.NewTermStringFilter("Manager", Manager))
+	if err := g.DelNodes(filter); err != nil {
+		logging.GetLogger().Errorf("Failed to cleanup Kubernetes graph nodes: %s", err)
+	}
+}
+
 func newObjectIndexerFromFilter(g *graph.Graph, h graph.ListenerHandler, filter *filters.Filter, indexes ...string) *graph.MetadataIndexer {
 	filtersArray := make([]*filters.Filter, len(indexes)+1)
 	filtersArray[0] = filter

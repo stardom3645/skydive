@@ -49,6 +49,21 @@ func (p *K8sProbe) Start() error {
 	return p.Probe.Start()
 }
 
+// Stop the k8s probe and remove stale Kubernetes graph nodes.
+func (p *K8sProbe) Stop() {
+	if p == nil {
+		return
+	}
+	if p.clusterSubprobe != nil {
+		p.clusterSubprobe.Stop()
+	}
+	if p.Probe == nil {
+		return
+	}
+	p.Probe.Stop()
+	CleanupK8sGraph(p.graph)
+}
+
 // NewConfig returns a new Kubernetes configuration object
 func NewConfig(kubeconfigPath string) (*rest.Config, *clientcmd.ClientConfig, error) {
 	var err error
@@ -124,6 +139,7 @@ func NewK8sProbe(g *graph.Graph) (*K8sProbe, error) {
 	if ShouldSkipK8sProbe() {
 		return nil, nil
 	}
+	CleanupK8sGraph(g)
 	kubeconfigPath := config.GetString("analyzer.topology.k8s.config_file")
 	enabledSubprobes := config.GetStringSlice("analyzer.topology.k8s.probes")
 
