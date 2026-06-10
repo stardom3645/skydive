@@ -99,7 +99,7 @@ func handleMoldKubernetesClusters(w http.ResponseWriter, r *http.Request, isProb
 		_ = writeMoldKubernetesSelection(selection)
 		_ = removeMoldKubernetesManagedKubeconfigs(staleSelection)
 		if stopProbe != nil {
-			stopProbe()
+			go stopProbe()
 		}
 	}
 	probeRunning := false
