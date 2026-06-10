@@ -263,10 +263,11 @@ func handleMoldKubernetesTest(w http.ResponseWriter, r *http.Request) {
 
 	clientset, err := kubernetes.NewForConfig(clientConfig)
 	if err != nil {
-		fail("client", "API Server 접근", err, "Kubernetes client를 생성하지 못했습니다.")
+		fail("client", "Kubernetes client 확인", err, "Kubernetes client를 생성하지 못했습니다.")
 		writeJSON(w, moldKubernetesTestResponse{OK: false, Message: "connection test failed", Checks: checks})
 		return
 	}
+	addCheck("client", "Kubernetes client 확인", true, "", "Kubernetes client를 생성했습니다.")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
