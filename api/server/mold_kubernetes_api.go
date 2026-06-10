@@ -94,8 +94,10 @@ func handleMoldKubernetesClusters(w http.ResponseWriter, r *http.Request, isProb
 	if selection.Enabled && isMoldKubernetesSelectionCurrent(selection, clusters) {
 		selectedID = selection.ClusterID
 	} else if selection.Enabled {
+		staleSelection := selection
 		selection = moldKubernetesSelection{Enabled: false, UpdatedAt: time.Now().UTC()}
 		_ = writeMoldKubernetesSelection(selection)
+		_ = removeMoldKubernetesManagedKubeconfigs(staleSelection)
 		if stopProbe != nil {
 			stopProbe()
 		}
@@ -201,9 +203,14 @@ func handleMoldKubernetesSelect(w http.ResponseWriter, r *http.Request, startPro
 }
 
 func handleMoldKubernetesDisable(w http.ResponseWriter, r *http.Request, stopProbe moldKubernetesProbeStopper) {
+	previousSelection, _ := readMoldKubernetesSelection()
 	selection := moldKubernetesSelection{Enabled: false, UpdatedAt: time.Now().UTC()}
 	if err := writeMoldKubernetesSelection(selection); err != nil {
 		http.Error(w, "failed to save collection state", http.StatusInternalServerError)
+		return
+	}
+	if err := removeMoldKubernetesManagedKubeconfigs(previousSelection); err != nil {
+		http.Error(w, "failed to remove kubeconfig", http.StatusInternalServerError)
 		return
 	}
 	if stopProbe != nil {
@@ -508,6 +515,28 @@ func moldKubernetesClusterKubeconfigPath(clusterID string) string {
 		safeID = "selected"
 	}
 	return filepath.Join(filepath.Dir(basePath), safeID+".kubeconfig")
+}
+
+func removeMoldKubernetesManagedKubeconfigs(selection moldKubernetesSelection) error {
+	if !config.GetBool("mold.kubernetes.enforceSelection") {
+		return nil
+	}
+	paths := []string{moldKubernetesKubeconfigPath()}
+	if strings.TrimSpace(selection.ClusterID) != "" {
+		paths = append(paths, moldKubernetesClusterKubeconfigPath(selection.ClusterID))
+	}
+	seen := make(map[string]bool)
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path == "" || seen[path] {
+			continue
+		}
+		seen[path] = true
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
 }
 
 func sanitizeKubernetesFileName(value string) string {
