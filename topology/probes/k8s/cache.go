@@ -18,6 +18,7 @@
 package k8s
 
 import (
+	"sync"
 	"time"
 
 	"github.com/skydive-project/skydive/graffiti/graph"
@@ -42,7 +43,8 @@ type k8sHandler interface {
 type KubeCache struct {
 	cache          cache.Indexer
 	controller     cache.Controller
-	stopController chan (struct{})
+	stopController chan struct{}
+	stopOnce       sync.Once
 	handlers       []k8sHandler
 }
 
@@ -98,7 +100,9 @@ func (c *KubeCache) Start() error {
 
 // Stop end waiting on Kubernetes events
 func (c *KubeCache) Stop() {
-	c.stopController <- struct{}{}
+	c.stopOnce.Do(func() {
+		close(c.stopController)
+	})
 }
 
 // NewKubeCache returns a new cache using the associed Kubernetes client.

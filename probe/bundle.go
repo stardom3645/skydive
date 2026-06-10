@@ -130,11 +130,14 @@ func (p *Bundle) AddHandler(typ string, handler Handler) {
 // RemoveHandler stops and removes a probe from the bundle.
 func (p *Bundle) RemoveHandler(typ string) {
 	p.Lock()
-	defer p.Unlock()
-
-	if handler, ok := p.Handlers[typ]; ok {
-		handler.Stop()
+	handler, ok := p.Handlers[typ]
+	if ok {
 		delete(p.Handlers, typ)
+	}
+	p.Unlock()
+
+	if ok {
+		handler.Stop()
 	}
 }
 
