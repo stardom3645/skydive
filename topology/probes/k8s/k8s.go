@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/skydive-project/skydive/config"
 	"github.com/skydive-project/skydive/graffiti/graph"
@@ -239,20 +240,42 @@ func NewK8sProbe(g *graph.Graph) (*K8sProbe, error) {
 }
 
 func getClusterName(kubeconfig *clientcmd.ClientConfig) string {
-	clusterName := config.GetString("analyzer.topology.k8s.cluster_name")
-	if len(clusterName) == 0 {
-		clusterName = "cluster"
+	if clusterName := strings.TrimSpace(config.GetString("analyzer.topology.k8s.cluster_name")); clusterName != "" {
+		return clusterName
+	}
+	if clusterName := moldKubernetesSelectedClusterName(); clusterName != "" {
+		return clusterName
+	}
 
-		if kubeconfig != nil {
-			rawconfig, err := (*kubeconfig).RawConfig()
-			if err == nil {
-				if context := rawconfig.Contexts[rawconfig.CurrentContext]; context != nil {
-					if context.Cluster != "" {
-						clusterName = context.Cluster
-					}
+	clusterName := "cluster"
+	if kubeconfig != nil {
+		rawconfig, err := (*kubeconfig).RawConfig()
+		if err == nil {
+			if context := rawconfig.Contexts[rawconfig.CurrentContext]; context != nil {
+				if context.Cluster != "" {
+					clusterName = context.Cluster
 				}
 			}
 		}
 	}
 	return clusterName
+}
+
+func moldKubernetesSelectedClusterName() string {
+	stateFile := config.GetString("mold.kubernetes.stateFile")
+	if strings.TrimSpace(stateFile) == "" {
+		return ""
+	}
+	data, err := os.ReadFile(stateFile)
+	if err != nil {
+		return ""
+	}
+	var state struct {
+		Enabled     bool   `json:"enabled"`
+		ClusterName string `json:"clusterName"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil || !state.Enabled {
+		return ""
+	}
+	return strings.TrimSpace(state.ClusterName)
 }
