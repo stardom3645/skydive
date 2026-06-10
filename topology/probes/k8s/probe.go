@@ -45,6 +45,10 @@ func InitLinkers(linkerHandlers []LinkHandler, g *graph.Graph) (linkers []probe.
 
 var subprobes = make(map[string]map[string]Subprobe)
 
+func resetSubprobes(manager string) {
+	subprobes[manager] = make(map[string]Subprobe)
+}
+
 // PutSubprobe puts a new subprobe in the subprobes map
 func PutSubprobe(manager, name string, subprobe Subprobe) {
 	subprobes[manager][name] = subprobe

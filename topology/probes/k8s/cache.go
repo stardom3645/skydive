@@ -126,6 +126,10 @@ func NewKubeCache(restClient rest.Interface, objType runtime.Object, resources s
 
 var kubeCacheMap = make(map[string]*KubeCache)
 
+func resetKubeCaches() {
+	kubeCacheMap = make(map[string]*KubeCache)
+}
+
 // RegisterKubeCache registers resource handler to kubernetes events.
 func RegisterKubeCache(restClient rest.Interface, objType runtime.Object, resources string, handler k8sHandler) *KubeCache {
 	if _, ok := kubeCacheMap[resources]; !ok {

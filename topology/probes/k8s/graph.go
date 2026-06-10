@@ -126,6 +126,12 @@ func CleanupK8sGraph(g *graph.Graph) {
 	}
 }
 
+func ResetK8sRuntimeState() {
+	resetSubprobes(Manager)
+	resetKubeCaches()
+	clusterNode = nil
+}
+
 func newObjectIndexerFromFilter(g *graph.Graph, h graph.ListenerHandler, filter *filters.Filter, indexes ...string) *graph.MetadataIndexer {
 	filtersArray := make([]*filters.Filter, len(indexes)+1)
 	filtersArray[0] = filter

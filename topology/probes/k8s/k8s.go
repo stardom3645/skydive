@@ -63,6 +63,7 @@ func (p *K8sProbe) Stop() {
 	}
 	p.Probe.Stop()
 	CleanupK8sGraph(p.graph)
+	ResetK8sRuntimeState()
 }
 
 // NewConfig returns a new Kubernetes configuration object
@@ -141,6 +142,7 @@ func NewK8sProbe(g *graph.Graph) (*K8sProbe, error) {
 		return nil, nil
 	}
 	CleanupK8sGraph(g)
+	ResetK8sRuntimeState()
 	kubeconfigPath := config.GetString("analyzer.topology.k8s.config_file")
 	enabledSubprobes := config.GetStringSlice("analyzer.topology.k8s.probes")
 
