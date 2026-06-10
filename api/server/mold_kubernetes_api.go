@@ -82,7 +82,7 @@ type moldKubernetesStatusResponse struct {
 	ProbeRunning   bool   `json:"probeRunning"`
 }
 
-func handleMoldKubernetesClusters(w http.ResponseWriter, r *http.Request, isProbeRunning moldKubernetesProbeStatus) {
+func handleMoldKubernetesClusters(w http.ResponseWriter, r *http.Request, isProbeRunning moldKubernetesProbeStatus, stopProbe moldKubernetesProbeStopper) {
 	clusters, err := listMoldKubernetesClusters()
 	if err != nil {
 		writeMoldKubernetesError(w, err)
@@ -91,8 +91,14 @@ func handleMoldKubernetesClusters(w http.ResponseWriter, r *http.Request, isProb
 
 	selection, _ := readMoldKubernetesSelection()
 	selectedID := ""
-	if selection.Enabled {
+	if selection.Enabled && isMoldKubernetesSelectionCurrent(selection, clusters) {
 		selectedID = selection.ClusterID
+	} else if selection.Enabled {
+		selection = moldKubernetesSelection{Enabled: false, UpdatedAt: time.Now().UTC()}
+		_ = writeMoldKubernetesSelection(selection)
+		if stopProbe != nil {
+			stopProbe()
+		}
 	}
 	probeRunning := false
 	if isProbeRunning != nil {
@@ -471,6 +477,22 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+func isMoldKubernetesSelectionCurrent(selection moldKubernetesSelection, clusters []moldKubernetesCluster) bool {
+	if !selection.Enabled || strings.TrimSpace(selection.ClusterID) == "" {
+		return false
+	}
+	for _, cluster := range clusters {
+		if cluster.ID != selection.ClusterID {
+			continue
+		}
+		if strings.TrimSpace(selection.APIServer) != "" && strings.TrimSpace(cluster.APIServer) != "" && selection.APIServer != cluster.APIServer {
+			return false
+		}
+		return true
+	}
+	return false
+}
+
 func moldKubernetesKubeconfigPath() string {
 	path := config.GetString("analyzer.topology.k8s.config_file")
 	if path != "" {
@@ -582,7 +604,7 @@ func writeJSON(w http.ResponseWriter, payload interface{}) {
 
 func RegisterMoldKubernetesAPI(httpServer *shttp.Server, startProbe moldKubernetesProbeStarter, stopProbe moldKubernetesProbeStopper, isProbeRunning moldKubernetesProbeStatus) {
 	httpServer.Router.HandleFunc("/api/mold/kubernetes-clusters", func(w http.ResponseWriter, r *http.Request) {
-		handleMoldKubernetesClusters(w, r, isProbeRunning)
+		handleMoldKubernetesClusters(w, r, isProbeRunning, stopProbe)
 	}).Methods("GET")
 	httpServer.Router.HandleFunc("/api/mold/kubernetes-clusters/select", func(w http.ResponseWriter, r *http.Request) {
 		handleMoldKubernetesSelect(w, r, startProbe)

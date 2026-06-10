@@ -112,8 +112,8 @@ func (s *Server) GetStatus() interface{} {
 func startMoldKubernetesProbe(g *graph.Graph, probeBundle *probe.Bundle) func() error {
 	return func() error {
 		if probeBundle.GetHandler("k8s") != nil {
-			logging.GetLogger().Info("Mold Kubernetes collection already running")
-			return nil
+			logging.GetLogger().Info("Restarting Mold Kubernetes collection probe with refreshed kubeconfig")
+			probeBundle.RemoveHandler("k8s")
 		}
 		if k8s.ShouldSkipK8sProbe() {
 			return fmt.Errorf("Kubernetes collection is not ready: kubeconfig or selection state is missing")
