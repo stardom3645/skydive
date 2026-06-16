@@ -404,6 +404,7 @@ func NewServerFromConfig() (*Server, error) {
 	httpServer := hub.HTTPServer()
 	api.RegisterPcapAPI(httpServer, s.flowStorage, apiAuthBackend)
 	api.RegisterConfigAPI(httpServer, apiAuthBackend)
+	api.RegisterSimpleCaptureAPI(httpServer, g, captureAPIHandler, apiAuthBackend)
 
 	// DB 캐시 로딩
 	common.LoadVmNameMapFromCloudstack()
