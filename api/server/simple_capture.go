@@ -19,6 +19,7 @@ import (
 	"github.com/skydive-project/skydive/graffiti/api/rest"
 	etcdclient "github.com/skydive-project/skydive/graffiti/etcd/client"
 	"github.com/skydive-project/skydive/graffiti/graph"
+	"github.com/skydive-project/skydive/graffiti/graph/traversal"
 	shttp "github.com/skydive-project/skydive/graffiti/http"
 	"github.com/skydive-project/skydive/graffiti/logging"
 )
@@ -67,11 +68,12 @@ type SimpleCapture struct {
 }
 
 type SimpleCaptureAPI struct {
-	graph      *graph.Graph
-	captureAPI *CaptureAPIHandler
-	store      *SimpleCaptureStore
-	timers     map[string]*time.Timer
-	mutex      sync.Mutex
+	graph         *graph.Graph
+	gremlinParser *traversal.GremlinTraversalParser
+	captureAPI    *CaptureAPIHandler
+	store         *SimpleCaptureStore
+	timers        map[string]*time.Timer
+	mutex         sync.Mutex
 }
 
 type SimpleCaptureStore struct {
@@ -351,6 +353,10 @@ func (a *SimpleCaptureAPI) create(w http.ResponseWriter, r *auth.AuthenticatedRe
 
 func (a *SimpleCaptureAPI) get(w http.ResponseWriter, r *auth.AuthenticatedRequest) {
 	id := strings.TrimPrefix(r.URL.Path, "/api/simple-capture/")
+	if strings.HasSuffix(id, "/download") {
+		a.download(strings.TrimSuffix(id, "/download"), w, r)
+		return
+	}
 	if id == "" {
 		a.writeError(w, http.StatusBadRequest, "id is required")
 		return
@@ -365,6 +371,61 @@ func (a *SimpleCaptureAPI) get(w http.ResponseWriter, r *auth.AuthenticatedReque
 		return
 	}
 	a.writeJSON(w, http.StatusOK, capture)
+}
+
+func (a *SimpleCaptureAPI) download(id string, w http.ResponseWriter, r *auth.AuthenticatedRequest) {
+	if r.Method != http.MethodGet {
+		a.writeError(w, http.StatusMethodNotAllowed, http.StatusText(http.StatusMethodNotAllowed))
+		return
+	}
+	if id == "" {
+		a.writeError(w, http.StatusBadRequest, "id is required")
+		return
+	}
+
+	capture, err := a.store.Get(id)
+	if err != nil {
+		if errors.Is(err, rest.ErrNotFound) {
+			a.writeError(w, http.StatusNotFound, "simple capture not found")
+			return
+		}
+		a.writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if capture.Status == "running" {
+		a.writeError(w, http.StatusConflict, "capture is still running")
+		return
+	}
+	if capture.Request.RawPacketLimit == 0 {
+		a.writeError(w, http.StatusConflict, "raw packet capture was disabled")
+		return
+	}
+	if capture.Target.NodeTID == "" {
+		a.writeError(w, http.StatusBadRequest, "capture target has no TID")
+		return
+	}
+
+	query := fmt.Sprintf("G.V().Has('TID', '%s').Flows().RawPackets()", capture.Target.NodeTID)
+	ts, err := a.gremlinParser.Parse(strings.NewReader(query))
+	if err != nil {
+		a.writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	result, err := ts.Exec(a.graph, true)
+	if err != nil {
+		a.writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	filename := fmt.Sprintf("netdive-capture-%s-%s.pcap", capture.Target.Name, capture.ID)
+	filename = strings.ReplaceAll(filename, "/", "-")
+	w.Header().Set("Content-Type", "application/vnd.tcpdump.pcap")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+	w.WriteHeader(http.StatusOK)
+	if err := pcapMarshaller(result, w); err != nil {
+		logging.GetLogger().Warningf("Failed to render simple capture %s as pcap: %s", capture.ID, err)
+	}
 }
 
 func (a *SimpleCaptureAPI) delete(w http.ResponseWriter, r *auth.AuthenticatedRequest) {
@@ -457,12 +518,13 @@ func (a *SimpleCaptureAPI) startSweeper() {
 	}
 }
 
-func RegisterSimpleCaptureAPI(httpServer *shttp.Server, graph *graph.Graph, captureAPI *CaptureAPIHandler, authBackend shttp.AuthenticationBackend) *SimpleCaptureAPI {
+func RegisterSimpleCaptureAPI(httpServer *shttp.Server, graph *graph.Graph, gremlinParser *traversal.GremlinTraversalParser, captureAPI *CaptureAPIHandler, authBackend shttp.AuthenticationBackend) *SimpleCaptureAPI {
 	api := &SimpleCaptureAPI{
-		graph:      graph,
-		captureAPI: captureAPI,
-		store:      NewSimpleCaptureStore(captureAPI.EtcdClient),
-		timers:     make(map[string]*time.Timer),
+		graph:         graph,
+		gremlinParser: gremlinParser,
+		captureAPI:    captureAPI,
+		store:         NewSimpleCaptureStore(captureAPI.EtcdClient),
+		timers:        make(map[string]*time.Timer),
 	}
 
 	routes := []shttp.Route{
