@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +27,7 @@ import (
 )
 
 const simpleCapturePrefix = "/simple-capture"
+const simpleCapturePcapPrefix = "/simple-capture-pcap"
 
 var simpleCaptureDurations = map[int]struct{}{
 	30:  {},
@@ -88,6 +91,10 @@ func (s *SimpleCaptureStore) path(id string) string {
 	return fmt.Sprintf("%s/%s", simpleCapturePrefix, id)
 }
 
+func (s *SimpleCaptureStore) pcapPath(id string) string {
+	return fmt.Sprintf("%s/%s", simpleCapturePcapPrefix, id)
+}
+
 func (s *SimpleCaptureStore) Save(capture *SimpleCapture) error {
 	data, err := json.Marshal(capture)
 	if err != nil {
@@ -95,6 +102,29 @@ func (s *SimpleCaptureStore) Save(capture *SimpleCapture) error {
 	}
 	_, err = s.etcdClient.KeysAPI.Set(context.Background(), s.path(capture.ID), string(data), nil)
 	return err
+}
+
+func (s *SimpleCaptureStore) SavePcap(id string, data []byte) error {
+	if len(data) == 0 {
+		return nil
+	}
+	_, err := s.etcdClient.KeysAPI.Set(context.Background(), s.pcapPath(id), base64.StdEncoding.EncodeToString(data), nil)
+	return err
+}
+
+func (s *SimpleCaptureStore) GetPcap(id string) ([]byte, error) {
+	resp, err := s.etcdClient.KeysAPI.Get(context.Background(), s.pcapPath(id), nil)
+	if err != nil {
+		if e, ok := err.(etcd.Error); ok && e.Code == etcd.ErrorCodeKeyNotFound {
+			return nil, rest.ErrNotFound
+		}
+		return nil, err
+	}
+	data, err := base64.StdEncoding.DecodeString(resp.Node.Value)
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 func (s *SimpleCaptureStore) Get(id string) (*SimpleCapture, error) {
@@ -405,16 +435,22 @@ func (a *SimpleCaptureAPI) download(id string, w http.ResponseWriter, r *auth.Au
 		return
 	}
 
-	query := fmt.Sprintf("G.V().Has('TID', '%s').Flows().RawPackets()", capture.Target.NodeTID)
-	ts, err := a.gremlinParser.Parse(strings.NewReader(query))
+	pcapData, err := a.store.GetPcap(capture.ID)
 	if err != nil {
-		a.writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
+		if !errors.Is(err, rest.ErrNotFound) {
+			a.writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 
-	result, err := ts.Exec(a.graph, true)
-	if err != nil {
-		a.writeError(w, http.StatusInternalServerError, err.Error())
+		// Compatibility fallback for captures created before snapshot persistence.
+		pcapData, err = a.renderCapturePCAP(capture)
+		if err != nil {
+			a.writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	if len(pcapData) == 0 {
+		a.writeError(w, http.StatusNotFound, "downloadable packet data is not available")
 		return
 	}
 
@@ -423,9 +459,26 @@ func (a *SimpleCaptureAPI) download(id string, w http.ResponseWriter, r *auth.Au
 	w.Header().Set("Content-Type", "application/vnd.tcpdump.pcap")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
 	w.WriteHeader(http.StatusOK)
-	if err := pcapMarshaller(result, w); err != nil {
-		logging.GetLogger().Warningf("Failed to render simple capture %s as pcap: %s", capture.ID, err)
+	_, _ = w.Write(pcapData)
+}
+
+func (a *SimpleCaptureAPI) renderCapturePCAP(capture *SimpleCapture) ([]byte, error) {
+	query := fmt.Sprintf("G.V().Has('TID', '%s').Flows().RawPackets()", capture.Target.NodeTID)
+	ts, err := a.gremlinParser.Parse(strings.NewReader(query))
+	if err != nil {
+		return nil, err
 	}
+
+	result, err := ts.Exec(a.graph, true)
+	if err != nil {
+		return nil, err
+	}
+
+	var buffer bytes.Buffer
+	if err := pcapMarshaller(result, &buffer); err != nil {
+		return nil, err
+	}
+	return buffer.Bytes(), nil
 }
 
 func (a *SimpleCaptureAPI) delete(w http.ResponseWriter, r *auth.AuthenticatedRequest) {
@@ -474,6 +527,16 @@ func (a *SimpleCaptureAPI) stop(id string) (*SimpleCapture, error) {
 	}
 	if capture.Status == "completed" || capture.Status == "expired" {
 		return capture, nil
+	}
+
+	if capture.Request.RawPacketLimit != 0 && capture.Target.NodeTID != "" {
+		if data, err := a.renderCapturePCAP(capture); err != nil {
+			logging.GetLogger().Warningf("Failed to snapshot simple capture %s pcap: %s", capture.ID, err)
+		} else if len(data) > 0 {
+			if err := a.store.SavePcap(capture.ID, data); err != nil {
+				logging.GetLogger().Warningf("Failed to save simple capture %s pcap snapshot: %s", capture.ID, err)
+			}
+		}
 	}
 
 	if err := a.captureAPI.Delete(capture.CaptureID); err != nil && !errors.Is(err, rest.ErrNotFound) {
