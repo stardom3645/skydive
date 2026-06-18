@@ -10,7 +10,12 @@ import (
 	shttp "github.com/skydive-project/skydive/graffiti/http"
 )
 
-const moldHostListCommand = "listHosts"
+const (
+	moldHostListCommand         = "listHosts"
+	moldHostVMListCommand       = "listVirtualMachines"
+	moldHostSystemVMListCommand = "listSystemVms"
+	moldHostRouterListCommand   = "listRouters"
+)
 
 type moldHostDetailResponse struct {
 	NodeID      string          `json:"nodeId,omitempty"`
@@ -41,6 +46,12 @@ type moldHostDetail struct {
 	MemoryAllocated        string `json:"memoryAllocated,omitempty"`
 	MemoryTotal            string `json:"memoryTotal,omitempty"`
 	MemoryAllocatedPercent string `json:"memoryAllocatedPercent,omitempty"`
+	StorageUsedPercent     string `json:"storageUsedPercent,omitempty"`
+	UserVMCount            *int   `json:"userVmCount,omitempty"`
+	RunningVMCount         *int   `json:"runningVmCount,omitempty"`
+	SystemVMCount          *int   `json:"systemVmCount,omitempty"`
+	VirtualRouterCount     *int   `json:"virtualRouterCount,omitempty"`
+	NetworkCount           *int   `json:"networkCount,omitempty"`
 }
 
 type moldHostLookupParams struct {
@@ -89,6 +100,8 @@ func handleMoldHostDetail(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+
+	_ = enrichMoldHostConnectedResources(host)
 
 	writeMoldHostDetailJSON(w, http.StatusOK, moldHostDetailResponse{
 		NodeID:      params.NodeID,
@@ -143,6 +156,106 @@ func findMoldHostDetailByAPIParam(key, value string, params moldHostLookupParams
 	return pickBestMoldHostDetail(hosts, params), nil
 }
 
+func enrichMoldHostConnectedResources(host *moldHostDetail) error {
+	hostID := firstNonEmptyString(host.UUID, host.ID)
+	if hostID == "" {
+		return nil
+	}
+
+	userVMs, err := requestMoldItems(moldHostVMListCommand, "virtualmachine", []apiParam{
+		{Key: "command", Value: moldHostVMListCommand},
+		{Key: "response", Value: "json"},
+		{Key: "hostid", Value: hostID},
+	})
+	if err == nil {
+		count := len(userVMs)
+		host.UserVMCount = &count
+		host.RunningVMCount = &count
+	}
+
+	systemVMs, err := requestMoldItems(moldHostSystemVMListCommand, "systemvm", []apiParam{
+		{Key: "command", Value: moldHostSystemVMListCommand},
+		{Key: "response", Value: "json"},
+		{Key: "hostid", Value: hostID},
+	})
+	if err == nil {
+		count := len(systemVMs)
+		host.SystemVMCount = &count
+	}
+
+	routers, err := requestMoldItems(moldHostRouterListCommand, "router", []apiParam{
+		{Key: "command", Value: moldHostRouterListCommand},
+		{Key: "response", Value: "json"},
+		{Key: "hostid", Value: hostID},
+	})
+	if err == nil {
+		count := len(routers)
+		host.VirtualRouterCount = &count
+	}
+
+	networks := make(map[string]struct{})
+	collectMoldNetworkIDs(userVMs, networks)
+	collectMoldNetworkIDs(systemVMs, networks)
+	collectMoldNetworkIDs(routers, networks)
+	if len(networks) > 0 {
+		count := len(networks)
+		host.NetworkCount = &count
+	}
+
+	return nil
+}
+
+func requestMoldItems(command, itemKey string, params []apiParam) ([]interface{}, error) {
+	body, _, err := requestMoldAPI(command, params)
+	if err != nil {
+		return nil, err
+	}
+	var payload interface{}
+	decoder := json.NewDecoder(strings.NewReader(string(body)))
+	decoder.UseNumber()
+	if err := decoder.Decode(&payload); err != nil {
+		return nil, fmt.Errorf("Mold %s response parse failed: %w", command, err)
+	}
+	return findMoldHostArrayByKey(payload, itemKey), nil
+}
+
+func collectMoldNetworkIDs(items []interface{}, out map[string]struct{}) {
+	for _, item := range items {
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		collectMoldNetworkIDsFromValue(m["nic"], out)
+		collectMoldNetworkIDsFromValue(m["nics"], out)
+		collectMoldNetworkID(m, out)
+	}
+}
+
+func collectMoldNetworkIDsFromValue(value interface{}, out map[string]struct{}) {
+	switch v := value.(type) {
+	case []interface{}:
+		for _, item := range v {
+			if m, ok := item.(map[string]interface{}); ok {
+				collectMoldNetworkID(m, out)
+			}
+		}
+	case map[string]interface{}:
+		collectMoldNetworkID(v, out)
+	}
+}
+
+func collectMoldNetworkID(m map[string]interface{}, out map[string]struct{}) {
+	key := firstNonEmptyString(
+		moldHostValueAsString(m["networkid"]),
+		moldHostValueAsString(m["networkId"]),
+		moldHostValueAsString(m["networkname"]),
+		moldHostValueAsString(m["networkName"]),
+	)
+	if key != "" {
+		out[key] = struct{}{}
+	}
+}
+
 func parseMoldHostDetails(body []byte) ([]moldHostDetail, error) {
 	var payload interface{}
 	decoder := json.NewDecoder(strings.NewReader(string(body)))
@@ -185,6 +298,7 @@ func parseMoldHostDetails(body []byte) ([]moldHostDetail, error) {
 		host.MemoryAllocated = firstNonEmptyString(moldHostValueAsString(m["memoryallocated"]), moldHostValueAsString(m["memoryAllocated"]))
 		host.MemoryTotal = firstNonEmptyString(moldHostValueAsString(m["memorytotal"]), moldHostValueAsString(m["memoryTotal"]))
 		host.MemoryAllocatedPercent = percentString(host.MemoryAllocated, host.MemoryTotal)
+		host.StorageUsedPercent = percentString(firstNonEmptyString(moldHostValueAsString(m["disksizeused"]), moldHostValueAsString(m["storageused"])), firstNonEmptyString(moldHostValueAsString(m["disksizetotal"]), moldHostValueAsString(m["storagetotal"])))
 		hosts = append(hosts, host)
 	}
 	return hosts, nil
