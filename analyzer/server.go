@@ -418,7 +418,7 @@ func NewServerFromConfig() (*Server, error) {
 	api.RegisterVMNetworkMapAPI(httpServer, common.GetVMNetworkMap, vmNetworkRefreshInterval)
 	api.RegisterMoldVMConsoleAPI(httpServer)
 	api.RegisterMoldKubernetesAPI(httpServer, startMoldKubernetesProbe(g, probeBundle), stopMoldKubernetesProbe(probeBundle), isMoldKubernetesProbeRunning(probeBundle))
-	RegisterMoldHostDetailAPI(httpServer)
+	api.RegisterMoldHostDetailAPI(httpServer)
 
 	if err := s.loadStaticWorkflows(); err != nil {
 		return nil, err
