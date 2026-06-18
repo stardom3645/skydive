@@ -1,419 +1,349 @@
 package server
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
-	"strconv"
+	"net/url"
+	"sort"
 	"strings"
+	"time"
 
+	"github.com/skydive-project/skydive/common"
 	shttp "github.com/skydive-project/skydive/graffiti/http"
 )
 
-const (
-	moldHostListCommand         = "listHosts"
-	moldHostVMListCommand       = "listVirtualMachines"
-	moldHostSystemVMListCommand = "listSystemVms"
-	moldHostRouterListCommand   = "listRouters"
-)
-
-type moldHostDetailResponse struct {
-	NodeID      string          `json:"nodeId,omitempty"`
-	Name        string          `json:"name,omitempty"`
-	MoldMatched bool            `json:"moldMatched"`
-	Mold        *moldHostDetail `json:"mold,omitempty"`
-	Message     string          `json:"message,omitempty"`
+type moldVMConsoleResponse struct {
+	URL string `json:"url"`
 }
 
-type moldHostDetail struct {
-	ID                     string `json:"id,omitempty"`
-	UUID                   string `json:"uuid,omitempty"`
-	Name                   string `json:"name,omitempty"`
-	State                  string `json:"state,omitempty"`
-	ResourceState          string `json:"resourceState,omitempty"`
-	ManagementIP           string `json:"managementIp,omitempty"`
-	Hypervisor             string `json:"hypervisor,omitempty"`
-	Type                   string `json:"type,omitempty"`
-	Zone                   string `json:"zone,omitempty"`
-	ZoneID                 string `json:"zoneId,omitempty"`
-	Pod                    string `json:"pod,omitempty"`
-	PodID                  string `json:"podId,omitempty"`
-	Cluster                string `json:"cluster,omitempty"`
-	ClusterID              string `json:"clusterId,omitempty"`
-	CPUAllocated           string `json:"cpuAllocated,omitempty"`
-	CPUTotal               string `json:"cpuTotal,omitempty"`
-	CPUAllocatedPercent    string `json:"cpuAllocatedPercent,omitempty"`
-	MemoryAllocated        string `json:"memoryAllocated,omitempty"`
-	MemoryTotal            string `json:"memoryTotal,omitempty"`
-	MemoryAllocatedPercent string `json:"memoryAllocatedPercent,omitempty"`
-	StorageUsedPercent     string `json:"storageUsedPercent,omitempty"`
-	UserVMCount            *int   `json:"userVmCount,omitempty"`
-	RunningVMCount         *int   `json:"runningVmCount,omitempty"`
-	SystemVMCount          *int   `json:"systemVmCount,omitempty"`
-	VirtualRouterCount     *int   `json:"virtualRouterCount,omitempty"`
-	NetworkCount           *int   `json:"networkCount,omitempty"`
+const moldConsoleCommand = "createConsoleEndpoint"
+
+type vmConsoleAPIError struct {
+	StatusCode int
+	Message    string
+	Err        error
 }
 
-type moldHostLookupParams struct {
-	NodeID       string
-	Name         string
-	HostID       string
-	ManagementIP string
+func (e *vmConsoleAPIError) Error() string {
+	return e.Message
 }
 
-func RegisterMoldHostDetailAPI(httpServer *shttp.Server) {
-	httpServer.Router.HandleFunc("/api/mold/hosts/detail", handleMoldHostDetail).Methods("GET")
+func (e *vmConsoleAPIError) Unwrap() error {
+	return e.Err
 }
 
-func handleMoldHostDetail(w http.ResponseWriter, r *http.Request) {
-	params := moldHostLookupParams{
-		NodeID:       strings.TrimSpace(r.URL.Query().Get("nodeId")),
-		Name:         strings.TrimSpace(r.URL.Query().Get("name")),
-		HostID:       firstNonEmptyString(r.URL.Query().Get("hostId"), r.URL.Query().Get("moldHostId"), r.URL.Query().Get("moldHostUuid")),
-		ManagementIP: firstNonEmptyString(r.URL.Query().Get("managementIp"), r.URL.Query().Get("ip"), r.URL.Query().Get("privateIp")),
+func newVMConsoleAPIError(code int, message string, err error) error {
+	return &vmConsoleAPIError{
+		StatusCode: code,
+		Message:    message,
+		Err:        err,
 	}
-	if params.Name == "" && params.HostID == "" && params.ManagementIP == "" {
-		writeMoldHostDetailJSON(w, http.StatusBadRequest, moldHostDetailResponse{
-			NodeID:      params.NodeID,
-			MoldMatched: false,
-			Message:     "name, hostId or managementIp is required.",
-		})
+}
+
+func writeVMConsoleError(w http.ResponseWriter, err error) {
+	apiErr := &vmConsoleAPIError{
+		StatusCode: http.StatusBadGateway,
+		Message:    "콘솔 URL 요청 실패",
+		Err:        err,
+	}
+	if errors.As(err, &apiErr) {
+		http.Error(w, apiErr.Message, apiErr.StatusCode)
+		return
+	}
+	http.Error(w, apiErr.Message, apiErr.StatusCode)
+}
+
+func handleMoldVMConsole(w http.ResponseWriter, r *http.Request) {
+	if !common.IsMoldConsoleEnabled() {
+		http.Error(w, "mold console disabled", http.StatusNotFound)
 		return
 	}
 
-	host, err := resolveMoldHostDetail(params)
+	nodeID := r.URL.Query().Get("nodeId")
+	vmID := r.URL.Query().Get("vmId")
+	instanceName := r.URL.Query().Get("instanceName")
+	mock := r.URL.Query().Get("mock")
+
+	consoleURL, err := getMoldVMConsoleURL(nodeID, vmID, instanceName, mock)
 	if err != nil {
-		writeMoldHostDetailJSON(w, http.StatusBadGateway, moldHostDetailResponse{
-			NodeID:      params.NodeID,
-			Name:        params.Name,
-			MoldMatched: false,
-			Message:     err.Error(),
-		})
-		return
-	}
-	if host == nil {
-		writeMoldHostDetailJSON(w, http.StatusOK, moldHostDetailResponse{
-			NodeID:      params.NodeID,
-			Name:        params.Name,
-			MoldMatched: false,
-			Message:     "Mold host metadata was not found by name, host id or management IP.",
-		})
+		writeVMConsoleError(w, err)
 		return
 	}
 
-	_ = enrichMoldHostConnectedResources(host)
-
-	writeMoldHostDetailJSON(w, http.StatusOK, moldHostDetailResponse{
-		NodeID:      params.NodeID,
-		Name:        firstNonEmptyString(params.Name, host.Name),
-		MoldMatched: true,
-		Mold:        host,
-	})
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(moldVMConsoleResponse{URL: consoleURL}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 }
 
-func resolveMoldHostDetail(params moldHostLookupParams) (*moldHostDetail, error) {
-	if params.HostID != "" {
-		host, err := findMoldHostDetailByAPIParam("id", params.HostID, params)
-		if err != nil || host != nil {
-			return host, err
-		}
-	}
-	if params.Name != "" {
-		host, err := findMoldHostDetailByAPIParam("name", params.Name, params)
-		if err != nil || host != nil {
-			return host, err
-		}
-
-		host, err = findMoldHostDetailByAPIParam("keyword", params.Name, params)
-		if err != nil || host != nil {
-			return host, err
-		}
-	}
-	if params.ManagementIP != "" {
-		host, err := findMoldHostDetailByAPIParam("keyword", params.ManagementIP, params)
-		if err != nil || host != nil {
-			return host, err
-		}
+func getMoldVMConsoleURL(nodeID, vmID, instanceName, mock string) (string, error) {
+	resolvedVMID, err := resolveVMID(nodeID, vmID, instanceName)
+	if err != nil {
+		return "", err
 	}
 
-	return nil, nil
+	return requestMoldConsoleURL(resolvedVMID, mock)
 }
 
-func findMoldHostDetailByAPIParam(key, value string, params moldHostLookupParams) (*moldHostDetail, error) {
-	body, _, err := requestMoldAPI(moldHostListCommand, []apiParam{
-		{Key: "command", Value: moldHostListCommand},
+func resolveVMID(nodeID, vmID, instanceName string) (string, error) {
+	if vmID != "" {
+		return vmID, nil
+	}
+
+	if instanceName != "" {
+		resolvedVMID, err := common.ResolveVMIDFromInstanceName(instanceName)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return "", newVMConsoleAPIError(http.StatusNotFound, "VM을 찾을 수 없습니다.", err)
+			}
+			return "", newVMConsoleAPIError(http.StatusBadGateway, "VM 조회(DB) 실패", err)
+		}
+		if resolvedVMID == "" {
+			return "", newVMConsoleAPIError(http.StatusNotFound, "VM을 찾을 수 없습니다.", nil)
+		}
+		return resolvedVMID, nil
+	}
+
+	if nodeID == "" {
+		return "", newVMConsoleAPIError(http.StatusBadRequest, "nodeId, instanceName or vmId is required", nil)
+	}
+
+	resolvedVMID, err := common.ResolveVMIDFromNodeID(nodeID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", newVMConsoleAPIError(http.StatusNotFound, "VM을 찾을 수 없습니다.", err)
+		}
+		return "", newVMConsoleAPIError(http.StatusBadGateway, "VM 조회(DB) 실패", err)
+	}
+	if resolvedVMID == "" {
+		return "", newVMConsoleAPIError(http.StatusNotFound, "VM을 찾을 수 없습니다.", nil)
+	}
+
+	return resolvedVMID, nil
+}
+
+func requestMoldConsoleURL(vmID, mock string) (string, error) {
+	if mock == "true" && common.IsMoldConsoleMockAllowed() {
+		return buildMockMoldConsoleURL(), nil
+	}
+
+	apiCfg := common.GetMoldAPIConfig()
+	if apiCfg.Endpoint == "" {
+		return "", newVMConsoleAPIError(http.StatusServiceUnavailable, "Mold API endpoint 설정이 비어 있습니다.", nil)
+	}
+
+	apiKey, secretKey, err := common.ReadMoldAPIKeys()
+	if err != nil {
+		secretErr := &common.SecretFileError{}
+		if errors.As(err, &secretErr) {
+			switch secretErr.KeyName {
+			case "mold.api.apiKeyFile":
+				switch secretErr.Reason {
+				case common.SecretFileMissing:
+					return "", newVMConsoleAPIError(http.StatusServiceUnavailable, "API Key 파일이 없습니다.", err)
+				case common.SecretFileEmpty:
+					return "", newVMConsoleAPIError(http.StatusServiceUnavailable, "API Key 파일이 비어 있습니다.", err)
+				default:
+					return "", newVMConsoleAPIError(http.StatusServiceUnavailable, "API Key 파일 읽기 실패", err)
+				}
+			case "mold.api.secretKeyFile":
+				switch secretErr.Reason {
+				case common.SecretFileMissing:
+					return "", newVMConsoleAPIError(http.StatusServiceUnavailable, "Secret Key 파일이 없습니다.", err)
+				case common.SecretFileEmpty:
+					return "", newVMConsoleAPIError(http.StatusServiceUnavailable, "Secret Key 파일이 비어 있습니다.", err)
+				default:
+					return "", newVMConsoleAPIError(http.StatusServiceUnavailable, "Secret Key 파일 읽기 실패", err)
+				}
+			}
+		}
+		return "", newVMConsoleAPIError(http.StatusServiceUnavailable, "Mold API Key/Secret 로드 실패", err)
+	}
+
+	baseURL, err := url.Parse(apiCfg.Endpoint)
+	if err != nil {
+		return "", newVMConsoleAPIError(http.StatusServiceUnavailable, "Mold API endpoint 설정이 올바르지 않습니다.", err)
+	}
+
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
+		},
+	}
+
+	if err := verifyMoldAPIListCapabilities(client, baseURL, apiKey, secretKey); err != nil {
+		return "", err
+	}
+
+	if url, _, err := callMoldAPI(client, baseURL, moldConsoleCommand, apiKey, secretKey, []apiParam{
+		{Key: "command", Value: moldConsoleCommand},
 		{Key: "response", Value: "json"},
-		{Key: key, Value: value},
+		{Key: "apikey", Value: apiKey},
+		{Key: "virtualmachineid", Value: vmID},
+	}); err == nil {
+		return url, nil
+	} else {
+		return "", err
+	}
+}
+
+type apiParam struct {
+	Key   string
+	Value string
+}
+
+func verifyMoldAPIListCapabilities(client *http.Client, baseURL *url.URL, apiKey, secretKey string) error {
+	_, status, err := callMoldAPI(client, baseURL, "listCapabilities", apiKey, secretKey, []apiParam{
+		{Key: "command", Value: "listCapabilities"},
+		{Key: "response", Value: "json"},
+		{Key: "apikey", Value: apiKey},
 	})
 	if err != nil {
-		return nil, err
+		switch status {
+		case http.StatusUnauthorized:
+			return newVMConsoleAPIError(http.StatusUnauthorized, "API Key/Secret 인증 실패", err)
+		case http.StatusForbidden:
+			return newVMConsoleAPIError(http.StatusForbidden, "콘솔 접근 권한 없음", err)
+		default:
+			return newVMConsoleAPIError(http.StatusBadGateway, "Mold API 호출 실패", err)
+		}
 	}
-
-	hosts, err := parseMoldHostDetails(body)
-	if err != nil {
-		return nil, err
-	}
-	return pickBestMoldHostDetail(hosts, params), nil
-}
-
-func enrichMoldHostConnectedResources(host *moldHostDetail) error {
-	hostID := firstNonEmptyString(host.UUID, host.ID)
-	if hostID == "" {
-		return nil
-	}
-
-	userVMs, err := requestMoldItems(moldHostVMListCommand, "virtualmachine", []apiParam{
-		{Key: "command", Value: moldHostVMListCommand},
-		{Key: "response", Value: "json"},
-		{Key: "hostid", Value: hostID},
-	})
-	if err == nil {
-		count := len(userVMs)
-		host.UserVMCount = &count
-		host.RunningVMCount = &count
-	}
-
-	systemVMs, err := requestMoldItems(moldHostSystemVMListCommand, "systemvm", []apiParam{
-		{Key: "command", Value: moldHostSystemVMListCommand},
-		{Key: "response", Value: "json"},
-		{Key: "hostid", Value: hostID},
-	})
-	if err == nil {
-		count := len(systemVMs)
-		host.SystemVMCount = &count
-	}
-
-	routers, err := requestMoldItems(moldHostRouterListCommand, "router", []apiParam{
-		{Key: "command", Value: moldHostRouterListCommand},
-		{Key: "response", Value: "json"},
-		{Key: "hostid", Value: hostID},
-	})
-	if err == nil {
-		count := len(routers)
-		host.VirtualRouterCount = &count
-	}
-
-	networks := make(map[string]struct{})
-	collectMoldNetworkIDs(userVMs, networks)
-	collectMoldNetworkIDs(systemVMs, networks)
-	collectMoldNetworkIDs(routers, networks)
-	if len(networks) > 0 {
-		count := len(networks)
-		host.NetworkCount = &count
-	}
-
 	return nil
 }
 
-func requestMoldItems(command, itemKey string, params []apiParam) ([]interface{}, error) {
-	body, _, err := requestMoldAPI(command, params)
+func callMoldAPI(client *http.Client, baseURL *url.URL, command, apiKey, secretKey string, reqParams []apiParam) (string, int, error) {
+	u := *baseURL
+	u.RawQuery = buildSignedRawQuery(reqParams, secretKey)
+
+	resp, err := client.Get(u.String())
 	if err != nil {
-		return nil, err
+		return "", 0, newVMConsoleAPIError(http.StatusBadGateway, "Mold API 호출 실패", err)
 	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", resp.StatusCode, newVMConsoleAPIError(http.StatusBadGateway, "Mold API 응답 읽기 실패", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if resp.StatusCode == http.StatusUnauthorized {
+			return "", resp.StatusCode, newVMConsoleAPIError(http.StatusUnauthorized, "API Key/Secret 인증 실패", nil)
+		}
+		if resp.StatusCode == http.StatusForbidden {
+			return "", resp.StatusCode, newVMConsoleAPIError(http.StatusForbidden, "콘솔 접근 권한 없음", nil)
+		}
+		return "", resp.StatusCode, newVMConsoleAPIError(http.StatusBadGateway, "Mold API 호출 실패", nil)
+	}
+	if command == "listCapabilities" {
+		return "ok", resp.StatusCode, nil
+	}
+
+	consoleURL, err := parseMoldConsoleURL(body)
+	if err != nil {
+		return "", resp.StatusCode, newVMConsoleAPIError(http.StatusBadGateway, "Mold API 응답 파싱 실패", err)
+	}
+	if consoleURL == "" {
+		return "", resp.StatusCode, newVMConsoleAPIError(http.StatusBadGateway, "콘솔 URL이 응답에 없습니다.", nil)
+	}
+	return consoleURL, resp.StatusCode, nil
+}
+
+func parseMoldConsoleURL(body []byte) (string, error) {
+	var simpleResponse struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(body, &simpleResponse); err == nil && simpleResponse.URL != "" {
+		return simpleResponse.URL, nil
+	}
+
 	var payload interface{}
-	decoder := json.NewDecoder(strings.NewReader(string(body)))
-	decoder.UseNumber()
-	if err := decoder.Decode(&payload); err != nil {
-		return nil, fmt.Errorf("Mold %s response parse failed: %w", command, err)
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return "", fmt.Errorf("failed to parse mold api response")
 	}
-	return findMoldHostArrayByKey(payload, itemKey), nil
+	if found := findConsoleURL(payload); found != "" {
+		return found, nil
+	}
+	return "", fmt.Errorf("console url not found in mold api response")
 }
 
-func collectMoldNetworkIDs(items []interface{}, out map[string]struct{}) {
-	for _, item := range items {
-		m, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		collectMoldNetworkIDsFromValue(m["nic"], out)
-		collectMoldNetworkIDsFromValue(m["nics"], out)
-		collectMoldNetworkID(m, out)
+func buildSignedRawQuery(reqParams []apiParam, secretKey string) string {
+	requestParts := make([]string, 0, len(reqParams))
+	reqMap := make(map[string]string, len(reqParams))
+	for _, p := range reqParams {
+		requestParts = append(requestParts, p.Key+"="+quotePlus(p.Value))
+		reqMap[p.Key] = p.Value
 	}
+	requestStr := strings.Join(requestParts, "&")
+	signature := buildMoldAPISignature(reqMap, secretKey)
+	return requestStr + "&signature=" + quotePlus(signature)
 }
 
-func collectMoldNetworkIDsFromValue(value interface{}, out map[string]struct{}) {
-	switch v := value.(type) {
-	case []interface{}:
-		for _, item := range v {
-			if m, ok := item.(map[string]interface{}); ok {
-				collectMoldNetworkID(m, out)
-			}
-		}
-	case map[string]interface{}:
-		collectMoldNetworkID(v, out)
+func buildMoldAPISignature(reqMap map[string]string, secretKey string) string {
+	keys := make([]string, 0, len(reqMap))
+	for k := range reqMap {
+		keys = append(keys, k)
 	}
+	sort.Strings(keys)
+
+	parts := make([]string, 0, len(reqMap))
+	for _, k := range keys {
+		key := strings.ToLower(k)
+		value := strings.ToLower(quotePlus(reqMap[k]))
+		value = strings.ReplaceAll(value, "+", "%20")
+		parts = append(parts, fmt.Sprintf("%s=%s", key, value))
+	}
+
+	toSign := strings.Join(parts, "&")
+	h := hmac.New(sha256.New, []byte(secretKey))
+	_, _ = h.Write([]byte(toSign))
+	return strings.TrimSpace(base64.StdEncoding.EncodeToString(h.Sum(nil)))
 }
 
-func collectMoldNetworkID(m map[string]interface{}, out map[string]struct{}) {
-	key := firstNonEmptyString(
-		moldHostValueAsString(m["networkid"]),
-		moldHostValueAsString(m["networkId"]),
-		moldHostValueAsString(m["networkname"]),
-		moldHostValueAsString(m["networkName"]),
-	)
-	if key != "" {
-		out[key] = struct{}{}
-	}
+func quotePlus(s string) string {
+	return strings.ReplaceAll(url.QueryEscape(s), "%20", "+")
 }
 
-func parseMoldHostDetails(body []byte) ([]moldHostDetail, error) {
-	var payload interface{}
-	decoder := json.NewDecoder(strings.NewReader(string(body)))
-	decoder.UseNumber()
-	if err := decoder.Decode(&payload); err != nil {
-		return nil, fmt.Errorf("Mold host detail response parse failed: %w", err)
-	}
-
-	items := findMoldHostArrayByKey(payload, "host")
-	hosts := make([]moldHostDetail, 0, len(items))
-	for _, item := range items {
-		m, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		host := moldHostDetail{
-			ID:            firstNonEmptyString(moldHostValueAsString(m["id"]), moldHostValueAsString(m["hostid"])),
-			UUID:          firstNonEmptyString(moldHostValueAsString(m["uuid"]), moldHostValueAsString(m["id"])),
-			Name:          moldHostValueAsString(m["name"]),
-			State:         firstNonEmptyString(moldHostValueAsString(m["state"]), moldHostValueAsString(m["status"])),
-			ResourceState: firstNonEmptyString(moldHostValueAsString(m["resourcestate"]), moldHostValueAsString(m["resourceState"])),
-			ManagementIP: firstNonEmptyString(
-				moldHostValueAsString(m["ipaddress"]),
-				moldHostValueAsString(m["privateipaddress"]),
-				moldHostValueAsString(m["managementip"]),
-				moldHostValueAsString(m["managementIp"]),
-			),
-			Hypervisor: firstNonEmptyString(moldHostValueAsString(m["hypervisor"]), moldHostValueAsString(m["hypervisortype"])),
-			Type:       moldHostValueAsString(m["type"]),
-			Zone:       firstNonEmptyString(moldHostValueAsString(m["zonename"]), moldHostValueAsString(m["zone"])),
-			ZoneID:     firstNonEmptyString(moldHostValueAsString(m["zoneid"]), moldHostValueAsString(m["data_center_id"])),
-			Pod:        firstNonEmptyString(moldHostValueAsString(m["podname"]), moldHostValueAsString(m["pod"])),
-			PodID:      firstNonEmptyString(moldHostValueAsString(m["podid"]), moldHostValueAsString(m["pod_id"])),
-			Cluster:    firstNonEmptyString(moldHostValueAsString(m["clustername"]), moldHostValueAsString(m["cluster"])),
-			ClusterID:  firstNonEmptyString(moldHostValueAsString(m["clusterid"]), moldHostValueAsString(m["cluster_id"])),
-		}
-		host.CPUAllocated = firstNonEmptyString(moldHostValueAsString(m["cpuallocated"]), moldHostValueAsString(m["cpuAllocated"]))
-		host.CPUTotal = firstNonEmptyString(moldHostValueAsString(m["cputotal"]), moldHostValueAsString(m["cpuTotal"]))
-		host.CPUAllocatedPercent = percentString(host.CPUAllocated, host.CPUTotal)
-		host.MemoryAllocated = firstNonEmptyString(moldHostValueAsString(m["memoryallocated"]), moldHostValueAsString(m["memoryAllocated"]))
-		host.MemoryTotal = firstNonEmptyString(moldHostValueAsString(m["memorytotal"]), moldHostValueAsString(m["memoryTotal"]))
-		host.MemoryAllocatedPercent = percentString(host.MemoryAllocated, host.MemoryTotal)
-		host.StorageUsedPercent = percentString(firstNonEmptyString(moldHostValueAsString(m["disksizeused"]), moldHostValueAsString(m["storageused"])), firstNonEmptyString(moldHostValueAsString(m["disksizetotal"]), moldHostValueAsString(m["storagetotal"])))
-		hosts = append(hosts, host)
-	}
-	return hosts, nil
+func buildMockMoldConsoleURL() string {
+	return "http://127.0.0.1/resource/noVNC/vnc.html?autoconnect=true&show_dot=true&port=8080&token=mock"
 }
 
-func pickBestMoldHostDetail(hosts []moldHostDetail, params moldHostLookupParams) *moldHostDetail {
-	if len(hosts) == 0 {
-		return nil
-	}
-	if params.HostID != "" {
-		for i := range hosts {
-			if strings.EqualFold(hosts[i].ID, params.HostID) || strings.EqualFold(hosts[i].UUID, params.HostID) {
-				return &hosts[i]
-			}
-		}
-	}
-	if params.Name != "" {
-		for i := range hosts {
-			if strings.EqualFold(hosts[i].Name, params.Name) {
-				return &hosts[i]
-			}
-		}
-	}
-	if params.ManagementIP != "" {
-		for i := range hosts {
-			if strings.TrimSpace(hosts[i].ManagementIP) == params.ManagementIP {
-				return &hosts[i]
-			}
-		}
-	}
-	return &hosts[0]
-}
-
-func findMoldHostArrayByKey(v interface{}, key string) []interface{} {
+func findConsoleURL(v interface{}) string {
 	switch t := v.(type) {
 	case map[string]interface{}:
 		for k, vv := range t {
-			if strings.EqualFold(k, key) {
-				if arr, ok := vv.([]interface{}); ok {
-					return arr
+			if strings.EqualFold(k, "url") || strings.Contains(strings.ToLower(k), "consoleproxyurl") {
+				if s, ok := vv.(string); ok && s != "" {
+					return s
 				}
 			}
-			if arr := findMoldHostArrayByKey(vv, key); arr != nil {
-				return arr
+			if s := findConsoleURL(vv); s != "" {
+				return s
 			}
 		}
 	case []interface{}:
 		for _, item := range t {
-			if arr := findMoldHostArrayByKey(item, key); arr != nil {
-				return arr
+			if s := findConsoleURL(item); s != "" {
+				return s
 			}
 		}
-	}
-	return nil
-}
-
-func moldHostValueAsString(v interface{}) string {
-	switch t := v.(type) {
 	case string:
-		return strings.TrimSpace(t)
-	case json.Number:
-		return t.String()
-	case fmt.Stringer:
-		return strings.TrimSpace(t.String())
-	default:
-		if t == nil {
-			return ""
-		}
-		return strings.TrimSpace(fmt.Sprintf("%v", t))
-	}
-}
-
-func firstNonEmptyString(values ...string) string {
-	for _, value := range values {
-		trimmed := strings.TrimSpace(value)
-		if trimmed != "" {
-			return trimmed
+		if strings.Contains(t, "/resource/noVNC/") || strings.Contains(strings.ToLower(t), "vnc.html") {
+			return t
 		}
 	}
 	return ""
 }
 
-func percentString(allocated, total string) string {
-	allocatedNumber, ok := parseFloatLikeString(allocated)
-	if !ok {
-		return ""
-	}
-	totalNumber, ok := parseFloatLikeString(total)
-	if !ok || totalNumber <= 0 {
-		return ""
-	}
-	return fmt.Sprintf("%.0f", allocatedNumber/totalNumber*100)
-}
-
-func parseFloatLikeString(value string) (float64, bool) {
-	cleaned := strings.TrimSpace(value)
-	if cleaned == "" {
-		return 0, false
-	}
-	cleaned = strings.ReplaceAll(cleaned, ",", "")
-	fields := strings.Fields(cleaned)
-	if len(fields) > 0 {
-		cleaned = fields[0]
-	}
-	number, err := strconv.ParseFloat(cleaned, 64)
-	if err != nil {
-		return 0, false
-	}
-	return number, true
-}
-
-func writeMoldHostDetailJSON(w http.ResponseWriter, statusCode int, payload moldHostDetailResponse) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(statusCode)
-	if err := json.NewEncoder(w).Encode(payload); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
+func RegisterMoldVMConsoleAPI(httpServer *shttp.Server) {
+	httpServer.Router.HandleFunc("/api/mold/vmconsole", handleMoldVMConsole).Methods("GET")
 }
