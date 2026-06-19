@@ -167,8 +167,11 @@ func enrichMoldHostConnectedResources(host *moldHostDetail) error {
 		{Key: "response", Value: "json"},
 		{Key: "hostid", Value: hostID},
 	})
+	regularUserVMs := userVMs
+	classifiedSystemVMs := []interface{}{}
 	if err == nil {
-		count := len(userVMs)
+		regularUserVMs, classifiedSystemVMs = splitMoldUserAndSystemVMs(userVMs)
+		count := countUniqueMoldItems(regularUserVMs)
 		host.UserVMCount = &count
 		host.RunningVMCount = &count
 	}
@@ -178,8 +181,8 @@ func enrichMoldHostConnectedResources(host *moldHostDetail) error {
 		{Key: "response", Value: "json"},
 		{Key: "hostid", Value: hostID},
 	})
-	if err == nil {
-		count := len(systemVMs)
+	if err == nil || len(classifiedSystemVMs) > 0 {
+		count := countUniqueMoldItems(systemVMs, classifiedSystemVMs)
 		host.SystemVMCount = &count
 	}
 
@@ -194,8 +197,9 @@ func enrichMoldHostConnectedResources(host *moldHostDetail) error {
 	}
 
 	networks := make(map[string]struct{})
-	collectMoldNetworkIDs(userVMs, networks)
+	collectMoldNetworkIDs(regularUserVMs, networks)
 	collectMoldNetworkIDs(systemVMs, networks)
+	collectMoldNetworkIDs(classifiedSystemVMs, networks)
 	collectMoldNetworkIDs(routers, networks)
 	if len(networks) > 0 {
 		count := len(networks)
@@ -217,6 +221,88 @@ func requestMoldItems(command, itemKey string, params []apiParam) ([]interface{}
 		return nil, fmt.Errorf("Mold %s response parse failed: %w", command, err)
 	}
 	return findMoldHostArrayByKey(payload, itemKey), nil
+}
+
+func splitMoldUserAndSystemVMs(items []interface{}) ([]interface{}, []interface{}) {
+	regular := make([]interface{}, 0, len(items))
+	systemLike := make([]interface{}, 0)
+	for _, item := range items {
+		m, ok := item.(map[string]interface{})
+		if ok && isMoldSystemLikeVM(m) {
+			systemLike = append(systemLike, item)
+			continue
+		}
+		regular = append(regular, item)
+	}
+	return regular, systemLike
+}
+
+func isMoldSystemLikeVM(m map[string]interface{}) bool {
+	text := strings.ToLower(strings.Join([]string{
+		moldHostValueAsString(m["name"]),
+		moldHostValueAsString(m["displayname"]),
+		moldHostValueAsString(m["displayName"]),
+		moldHostValueAsString(m["instancename"]),
+		moldHostValueAsString(m["instanceName"]),
+		moldHostValueAsString(m["hostname"]),
+		moldHostValueAsString(m["serviceofferingname"]),
+		moldHostValueAsString(m["serviceOfferingName"]),
+		moldHostValueAsString(m["templatename"]),
+		moldHostValueAsString(m["templateName"]),
+		moldHostValueAsString(m["type"]),
+	}, " "))
+	if strings.Contains(text, "router") || strings.Contains(text, "domain router") || strings.Contains(text, "virtual router") {
+		return false
+	}
+	patterns := []string{
+		"scvm",
+		"storage controller",
+		"glue storage",
+		"storage vm",
+		"system vm",
+		"systemvm",
+		"secondary storage",
+		"console proxy",
+		"cpvm",
+		"ssvm",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(text, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+func countUniqueMoldItems(groups ...[]interface{}) int {
+	seen := make(map[string]struct{})
+	count := 0
+	for _, group := range groups {
+		for _, item := range group {
+			m, ok := item.(map[string]interface{})
+			if !ok {
+				count++
+				continue
+			}
+			key := firstNonEmptyString(
+				moldHostValueAsString(m["id"]),
+				moldHostValueAsString(m["uuid"]),
+				moldHostValueAsString(m["name"]),
+				moldHostValueAsString(m["instancename"]),
+				moldHostValueAsString(m["instanceName"]),
+			)
+			if key == "" {
+				count++
+				continue
+			}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			count++
+		}
+	}
+	return count
 }
 
 func collectMoldNetworkIDs(items []interface{}, out map[string]struct{}) {
