@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -18,8 +17,8 @@ import (
 
 const (
 	defaultWallPrometheusURL = "http://127.0.0.1:3001"
-	defaultTrendRange       = 3 * time.Hour
-	defaultTrendStep        = 60 * time.Second
+	defaultTrendRange        = 3 * time.Hour
+	defaultTrendStep         = 60 * time.Second
 )
 
 type wallHostTrendResponse struct {
@@ -77,6 +76,13 @@ func handleWallHostTrend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Wall 대시보드의 $host, $job 변수는 Prometheus API에서 자동 치환되지 않습니다.
+	// API에서는 실제 라벨 값으로 변환하여 query_range를 호출합니다.
+	prometheusHost := firstNonEmptyString(managementIP, ip, host, name)
+	prometheusJob := firstNonEmptyString(strings.TrimSpace(r.URL.Query().Get("job")), "cube")
+	prometheusPort := firstNonEmptyString(strings.TrimSpace(r.URL.Query().Get("port")), "3003")
+	prometheusInstance := prometheusHost + ":" + prometheusPort
+
 	trendRange := parseDurationOrDefault(r.URL.Query().Get("range"), defaultTrendRange)
 	step := parseDurationOrDefault(r.URL.Query().Get("step"), defaultTrendStep)
 	if step < 30*time.Second {
@@ -85,7 +91,6 @@ func handleWallHostTrend(w http.ResponseWriter, r *http.Request) {
 
 	end := time.Now()
 	start := end.Add(-trendRange)
-	instanceMatcher := buildPrometheusInstanceMatcher(matchValues)
 
 	queries := []wallHostTrendSeries{
 		{
@@ -93,8 +98,11 @@ func handleWallHostTrend(w http.ResponseWriter, r *http.Request) {
 			Label: "CPU",
 			Unit:  "percent",
 			Query: fmt.Sprintf(
-				`100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle", instance=~"%s"}[5m])) * 100)`,
-				instanceMatcher,
+				`sum (sum by (mode) (irate(node_cpu_seconds_total{instance="%s", job="%s", mode=~"(irq|nice|softirq|steal|system|user|iowait)"}[1m])) / scalar(sum(irate(node_cpu_seconds_total{instance="%s", job="%s"}[1m]))) * 100)`,
+				prometheusInstance,
+				prometheusJob,
+				prometheusInstance,
+				prometheusJob,
 			),
 		},
 		{
@@ -102,9 +110,11 @@ func handleWallHostTrend(w http.ResponseWriter, r *http.Request) {
 			Label: "Memory",
 			Unit:  "percent",
 			Query: fmt.Sprintf(
-				`(1 - (node_memory_MemAvailable_bytes{instance=~"%s"} / node_memory_MemTotal_bytes{instance=~"%s"})) * 100`,
-				instanceMatcher,
-				instanceMatcher,
+				`(1 - (node_memory_MemAvailable_bytes{instance="%s", job="%s"} / node_memory_MemTotal_bytes{instance="%s", job="%s"})) * 100`,
+				prometheusInstance,
+				prometheusJob,
+				prometheusInstance,
+				prometheusJob,
 			),
 		},
 		{
@@ -112,9 +122,11 @@ func handleWallHostTrend(w http.ResponseWriter, r *http.Request) {
 			Label: "Disk",
 			Unit:  "percent",
 			Query: fmt.Sprintf(
-				`max by (instance) ((1 - (node_filesystem_avail_bytes{instance=~"%s", fstype!~"tmpfs|overlay|squashfs|autofs|proc|sysfs", mountpoint!~"/run.*|/var/lib/docker/.*|/var/lib/containers/.*"} / node_filesystem_size_bytes{instance=~"%s", fstype!~"tmpfs|overlay|squashfs|autofs|proc|sysfs", mountpoint!~"/run.*|/var/lib/docker/.*|/var/lib/containers/.*"})) * 100)`,
-				instanceMatcher,
-				instanceMatcher,
+				`max ((1 - (node_filesystem_avail_bytes{instance="%s", job="%s", fstype!~"tmpfs|overlay|squashfs|autofs|proc|sysfs", mountpoint!~"/run.*|/var/lib/docker/.*|/var/lib/containers/.*"} / node_filesystem_size_bytes{instance="%s", job="%s", fstype!~"tmpfs|overlay|squashfs|autofs|proc|sysfs", mountpoint!~"/run.*|/var/lib/docker/.*|/var/lib/containers/.*"})) * 100)`,
+				prometheusInstance,
+				prometheusJob,
+				prometheusInstance,
+				prometheusJob,
 			),
 		},
 		{
@@ -122,8 +134,9 @@ func handleWallHostTrend(w http.ResponseWriter, r *http.Request) {
 			Label: "Network RX",
 			Unit:  "bps",
 			Query: fmt.Sprintf(
-				`sum by (instance) (rate(node_network_receive_bytes_total{instance=~"%s", device!~"lo|veth.*|docker.*|br.*|virbr.*|tap.*"}[5m])) * 8`,
-				instanceMatcher,
+				`sum (irate(node_network_receive_bytes_total{instance="%s", job="%s", device!~"lo|veth.*|docker.*|br.*|virbr.*|tap.*"}[1m])) * 8`,
+				prometheusInstance,
+				prometheusJob,
 			),
 		},
 		{
@@ -131,8 +144,9 @@ func handleWallHostTrend(w http.ResponseWriter, r *http.Request) {
 			Label: "Network TX",
 			Unit:  "bps",
 			Query: fmt.Sprintf(
-				`sum by (instance) (rate(node_network_transmit_bytes_total{instance=~"%s", device!~"lo|veth.*|docker.*|br.*|virbr.*|tap.*"}[5m])) * 8`,
-				instanceMatcher,
+				`sum (irate(node_network_transmit_bytes_total{instance="%s", job="%s", device!~"lo|veth.*|docker.*|br.*|virbr.*|tap.*"}[1m])) * 8`,
+				prometheusInstance,
+				prometheusJob,
 			),
 		},
 	}
@@ -306,23 +320,6 @@ func wallPrometheusURL() string {
 		}
 	}
 	return defaultWallPrometheusURL
-}
-
-func buildPrometheusInstanceMatcher(values []string) string {
-	escaped := make([]string, 0, len(values))
-	for _, value := range values {
-		cleaned := strings.TrimSpace(value)
-		if cleaned == "" {
-			continue
-		}
-		escaped = append(escaped, regexp.QuoteMeta(cleaned))
-	}
-
-	if len(escaped) == 0 {
-		return ".*"
-	}
-
-	return ".*(" + strings.Join(escaped, "|") + ").*"
 }
 
 func parseDurationOrDefault(value string, fallback time.Duration) time.Duration {
