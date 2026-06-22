@@ -70,18 +70,10 @@ func handleWallHostTrend(w http.ResponseWriter, r *http.Request) {
 	managementIP := strings.TrimSpace(r.URL.Query().Get("managementIp"))
 	ip := strings.TrimSpace(r.URL.Query().Get("ip"))
 
-	matchValues := uniqueNonEmptyStrings(host, name, managementIP, ip)
-	if len(matchValues) == 0 {
+	if len(uniqueNonEmptyStrings(host, name, managementIP, ip)) == 0 {
 		writeWallHostTrendError(w, http.StatusBadRequest, "host, name, managementIp or ip is required.")
 		return
 	}
-
-	// Wall 대시보드의 $host, $job 변수는 Prometheus API에서 자동 치환되지 않습니다.
-	// API에서는 실제 라벨 값으로 변환하여 query_range를 호출합니다.
-	prometheusHost := firstNonEmptyString(managementIP, ip, host, name)
-	prometheusJob := firstNonEmptyString(strings.TrimSpace(r.URL.Query().Get("job")), "cube")
-	prometheusPort := firstNonEmptyString(strings.TrimSpace(r.URL.Query().Get("port")), "3003")
-	prometheusInstance := prometheusHost + ":" + prometheusPort
 
 	trendRange := parseDurationOrDefault(r.URL.Query().Get("range"), defaultTrendRange)
 	step := parseDurationOrDefault(r.URL.Query().Get("step"), defaultTrendStep)
@@ -91,11 +83,17 @@ func handleWallHostTrend(w http.ResponseWriter, r *http.Request) {
 
 	end := time.Now()
 	start := end.Add(-trendRange)
+	prometheusHost := firstNonEmptyString(managementIP, ip, host, name)
+	prometheusJob := firstNonEmptyString(strings.TrimSpace(r.URL.Query().Get("job")), "cube")
+	prometheusPort := firstNonEmptyString(strings.TrimSpace(r.URL.Query().Get("port")), "3003")
+	prometheusInstance := prometheusHost + ":" + prometheusPort
+	diskDeviceFilter := `device!~"loop.*|ram.*|fd.*|sr.*|dm-.*|zram.*"`
+	networkDeviceFilter := `device!~"lo|veth.*|docker.*|br.*|virbr.*|tap.*"`
 
 	queries := []wallHostTrendSeries{
 		{
 			Key:   "cpu",
-			Label: "CPU",
+			Label: "CPU Usage",
 			Unit:  "percent",
 			Query: fmt.Sprintf(
 				`sum (sum by (mode) (irate(node_cpu_seconds_total{instance="%s", job="%s", mode=~"(irq|nice|softirq|steal|system|user|iowait)"}[1m])) / scalar(sum(irate(node_cpu_seconds_total{instance="%s", job="%s"}[1m]))) * 100)`,
@@ -107,7 +105,7 @@ func handleWallHostTrend(w http.ResponseWriter, r *http.Request) {
 		},
 		{
 			Key:   "memory",
-			Label: "Memory",
+			Label: "Memory Usage",
 			Unit:  "percent",
 			Query: fmt.Sprintf(
 				`(1 - (node_memory_MemAvailable_bytes{instance="%s", job="%s"} / node_memory_MemTotal_bytes{instance="%s", job="%s"})) * 100`,
@@ -118,35 +116,59 @@ func handleWallHostTrend(w http.ResponseWriter, r *http.Request) {
 			),
 		},
 		{
-			Key:   "disk",
-			Label: "Disk",
-			Unit:  "percent",
+			Key:   "storageIops",
+			Label: "Storage IOPS",
+			Unit:  "iops",
 			Query: fmt.Sprintf(
-				`max ((1 - (node_filesystem_avail_bytes{instance="%s", job="%s", fstype!~"tmpfs|overlay|squashfs|autofs|proc|sysfs", mountpoint!~"/run.*|/var/lib/docker/.*|/var/lib/containers/.*"} / node_filesystem_size_bytes{instance="%s", job="%s", fstype!~"tmpfs|overlay|squashfs|autofs|proc|sysfs", mountpoint!~"/run.*|/var/lib/docker/.*|/var/lib/containers/.*"})) * 100)`,
+				`sum(rate(node_disk_reads_completed_total{instance="%s", job="%s", %s}[1m]) + rate(node_disk_writes_completed_total{instance="%s", job="%s", %s}[1m]))`,
 				prometheusInstance,
 				prometheusJob,
+				diskDeviceFilter,
 				prometheusInstance,
 				prometheusJob,
+				diskDeviceFilter,
 			),
 		},
 		{
 			Key:   "networkRx",
-			Label: "Network RX",
+			Label: "RX",
 			Unit:  "bps",
 			Query: fmt.Sprintf(
-				`sum (irate(node_network_receive_bytes_total{instance="%s", job="%s", device!~"lo|veth.*|docker.*|br.*|virbr.*|tap.*"}[1m])) * 8`,
+				`sum(rate(node_network_receive_bytes_total{instance="%s", job="%s", %s}[1m])) * 8`,
 				prometheusInstance,
 				prometheusJob,
+				networkDeviceFilter,
 			),
 		},
 		{
 			Key:   "networkTx",
-			Label: "Network TX",
+			Label: "TX",
 			Unit:  "bps",
 			Query: fmt.Sprintf(
-				`sum (irate(node_network_transmit_bytes_total{instance="%s", job="%s", device!~"lo|veth.*|docker.*|br.*|virbr.*|tap.*"}[1m])) * 8`,
+				`sum(rate(node_network_transmit_bytes_total{instance="%s", job="%s", %s}[1m])) * 8`,
 				prometheusInstance,
 				prometheusJob,
+				networkDeviceFilter,
+			),
+		},
+		{
+			Key:   "networkDrops",
+			Label: "Network Drops",
+			Unit:  "count",
+			Query: fmt.Sprintf(
+				`sum(increase(node_network_receive_drop_total{instance="%s", job="%s", %s}[1m]) + increase(node_network_transmit_drop_total{instance="%s", job="%s", %s}[1m]) + increase(node_network_receive_errs_total{instance="%s", job="%s", %s}[1m]) + increase(node_network_transmit_errs_total{instance="%s", job="%s", %s}[1m]))`,
+				prometheusInstance,
+				prometheusJob,
+				networkDeviceFilter,
+				prometheusInstance,
+				prometheusJob,
+				networkDeviceFilter,
+				prometheusInstance,
+				prometheusJob,
+				networkDeviceFilter,
+				prometheusInstance,
+				prometheusJob,
+				networkDeviceFilter,
 			),
 		},
 	}
