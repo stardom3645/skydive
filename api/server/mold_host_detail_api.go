@@ -26,32 +26,45 @@ type moldHostDetailResponse struct {
 }
 
 type moldHostDetail struct {
-	ID                     string `json:"id,omitempty"`
-	UUID                   string `json:"uuid,omitempty"`
-	Name                   string `json:"name,omitempty"`
-	State                  string `json:"state,omitempty"`
-	ResourceState          string `json:"resourceState,omitempty"`
-	ManagementIP           string `json:"managementIp,omitempty"`
-	Hypervisor             string `json:"hypervisor,omitempty"`
-	Type                   string `json:"type,omitempty"`
-	Zone                   string `json:"zone,omitempty"`
-	ZoneID                 string `json:"zoneId,omitempty"`
-	Pod                    string `json:"pod,omitempty"`
-	PodID                  string `json:"podId,omitempty"`
-	Cluster                string `json:"cluster,omitempty"`
-	ClusterID              string `json:"clusterId,omitempty"`
-	CPUAllocated           string `json:"cpuAllocated,omitempty"`
-	CPUTotal               string `json:"cpuTotal,omitempty"`
-	CPUAllocatedPercent    string `json:"cpuAllocatedPercent,omitempty"`
-	MemoryAllocated        string `json:"memoryAllocated,omitempty"`
-	MemoryTotal            string `json:"memoryTotal,omitempty"`
-	MemoryAllocatedPercent string `json:"memoryAllocatedPercent,omitempty"`
-	StorageUsedPercent     string `json:"storageUsedPercent,omitempty"`
-	UserVMCount            *int   `json:"userVmCount,omitempty"`
-	RunningVMCount         *int   `json:"runningVmCount,omitempty"`
-	SystemVMCount          *int   `json:"systemVmCount,omitempty"`
-	VirtualRouterCount     *int   `json:"virtualRouterCount,omitempty"`
-	NetworkCount           *int   `json:"networkCount,omitempty"`
+	ID                     string                `json:"id,omitempty"`
+	UUID                   string                `json:"uuid,omitempty"`
+	Name                   string                `json:"name,omitempty"`
+	State                  string                `json:"state,omitempty"`
+	ResourceState          string                `json:"resourceState,omitempty"`
+	ManagementIP           string                `json:"managementIp,omitempty"`
+	Hypervisor             string                `json:"hypervisor,omitempty"`
+	Type                   string                `json:"type,omitempty"`
+	Zone                   string                `json:"zone,omitempty"`
+	ZoneID                 string                `json:"zoneId,omitempty"`
+	Pod                    string                `json:"pod,omitempty"`
+	PodID                  string                `json:"podId,omitempty"`
+	Cluster                string                `json:"cluster,omitempty"`
+	ClusterID              string                `json:"clusterId,omitempty"`
+	CPUAllocated           string                `json:"cpuAllocated,omitempty"`
+	CPUTotal               string                `json:"cpuTotal,omitempty"`
+	CPUAllocatedPercent    string                `json:"cpuAllocatedPercent,omitempty"`
+	MemoryAllocated        string                `json:"memoryAllocated,omitempty"`
+	MemoryTotal            string                `json:"memoryTotal,omitempty"`
+	MemoryAllocatedPercent string                `json:"memoryAllocatedPercent,omitempty"`
+	StorageUsedPercent     string                `json:"storageUsedPercent,omitempty"`
+	UserVMCount            *int                  `json:"userVmCount,omitempty"`
+	RunningVMCount         *int                  `json:"runningVmCount,omitempty"`
+	SystemVMCount          *int                  `json:"systemVmCount,omitempty"`
+	VirtualRouterCount     *int                  `json:"virtualRouterCount,omitempty"`
+	NetworkCount           *int                  `json:"networkCount,omitempty"`
+	ConnectedVMs           []moldHostConnectedVM `json:"connectedVMs,omitempty"`
+}
+
+type moldHostConnectedVM struct {
+	ID           string   `json:"id,omitempty"`
+	UUID         string   `json:"uuid,omitempty"`
+	Name         string   `json:"name,omitempty"`
+	DisplayName  string   `json:"displayName,omitempty"`
+	InstanceName string   `json:"instanceName,omitempty"`
+	HostID       string   `json:"hostId,omitempty"`
+	HostName     string   `json:"hostName,omitempty"`
+	HostIP       string   `json:"hostIp,omitempty"`
+	IPs          []string `json:"ips,omitempty"`
 }
 
 type moldHostLookupParams struct {
@@ -206,7 +219,88 @@ func enrichMoldHostConnectedResources(host *moldHostDetail) error {
 		host.NetworkCount = &count
 	}
 
+	host.ConnectedVMs = collectMoldHostConnectedVMs(regularUserVMs, systemVMs, classifiedSystemVMs, routers)
+
 	return nil
+}
+
+func collectMoldHostConnectedVMs(groups ...[]interface{}) []moldHostConnectedVM {
+	seen := make(map[string]struct{})
+	vms := make([]moldHostConnectedVM, 0)
+	for _, group := range groups {
+		for _, item := range group {
+			m, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			vm := moldHostConnectedVM{
+				ID:           firstNonEmptyString(moldHostValueAsString(m["id"]), moldHostValueAsString(m["vmid"])),
+				UUID:         firstNonEmptyString(moldHostValueAsString(m["uuid"]), moldHostValueAsString(m["id"])),
+				Name:         moldHostValueAsString(m["name"]),
+				DisplayName:  firstNonEmptyString(moldHostValueAsString(m["displayname"]), moldHostValueAsString(m["displayName"])),
+				InstanceName: firstNonEmptyString(moldHostValueAsString(m["instancename"]), moldHostValueAsString(m["instanceName"])),
+				HostID:       firstNonEmptyString(moldHostValueAsString(m["hostid"]), moldHostValueAsString(m["hostId"])),
+				HostName:     firstNonEmptyString(moldHostValueAsString(m["hostname"]), moldHostValueAsString(m["hostName"]), moldHostValueAsString(m["host"])),
+				HostIP:       firstNonEmptyString(moldHostValueAsString(m["hostip"]), moldHostValueAsString(m["hostIp"])),
+				IPs:          collectMoldVMIPs(m),
+			}
+			key := firstNonEmptyString(vm.ID, vm.UUID, vm.InstanceName, vm.Name, vm.DisplayName)
+			if key == "" {
+				continue
+			}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			vms = append(vms, vm)
+		}
+	}
+	return vms
+}
+
+func collectMoldVMIPs(m map[string]interface{}) []string {
+	seen := make(map[string]struct{})
+	ips := make([]string, 0)
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		if _, ok := seen[value]; ok {
+			return
+		}
+		seen[value] = struct{}{}
+		ips = append(ips, value)
+	}
+	add(firstNonEmptyString(moldHostValueAsString(m["ipaddress"]), moldHostValueAsString(m["ipAddress"])))
+	collectMoldVMIPsFromValue(m["nic"], add)
+	collectMoldVMIPsFromValue(m["nics"], add)
+	return ips
+}
+
+func collectMoldVMIPsFromValue(value interface{}, add func(string)) {
+	switch v := value.(type) {
+	case []interface{}:
+		for _, item := range v {
+			if m, ok := item.(map[string]interface{}); ok {
+				collectMoldVMIPsFromMap(m, add)
+			}
+		}
+	case map[string]interface{}:
+		collectMoldVMIPsFromMap(v, add)
+	}
+}
+
+func collectMoldVMIPsFromMap(m map[string]interface{}, add func(string)) {
+	add(firstNonEmptyString(moldHostValueAsString(m["ipaddress"]), moldHostValueAsString(m["ipAddress"])))
+	add(firstNonEmptyString(moldHostValueAsString(m["secondaryip"]), moldHostValueAsString(m["secondaryIp"])))
+	if secondary, ok := m["secondaryip"].([]interface{}); ok {
+		for _, item := range secondary {
+			if sm, ok := item.(map[string]interface{}); ok {
+				add(firstNonEmptyString(moldHostValueAsString(sm["ipaddress"]), moldHostValueAsString(sm["ipAddress"])))
+			}
+		}
+	}
 }
 
 func requestMoldItems(command, itemKey string, params []apiParam) ([]interface{}, error) {
