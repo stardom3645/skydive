@@ -90,6 +90,7 @@ type Probe struct {
 	graph     *graph.Graph
 	manager   string
 	subprobes map[string]Subprobe
+	cluster   *clusterCache
 	linkers   []probe.Handler
 	verifiers []probe.Handler
 }
@@ -153,8 +154,7 @@ func (p *Probe) Stop() {
 
 // AppendClusterLinkers appends newly created cluster linker per type
 func (p *Probe) AppendClusterLinkers(types ...string) {
-	clusterProbe, _ := p.subprobes[Cluster].(*clusterCache)
-	if clusterLinker := newClusterLinker(p.graph, p.manager, clusterProbe, types...); clusterLinker != nil {
+	if clusterLinker := newClusterLinker(p.graph, p.manager, p.cluster, types...); clusterLinker != nil {
 		p.linkers = append(p.linkers, clusterLinker)
 	}
 }
@@ -167,7 +167,7 @@ func (p *Probe) AppendNamespaceLinkers(types ...string) {
 }
 
 // NewProbe creates the probe for tracking k8s events
-func NewProbe(g *graph.Graph, manager string, subprobes map[string]Subprobe, linkers []probe.Handler, verifiers []probe.Handler) *Probe {
+func NewProbe(g *graph.Graph, manager string, subprobes map[string]Subprobe, cluster *clusterCache, linkers []probe.Handler, verifiers []probe.Handler) *Probe {
 	names := []string{}
 	for k := range subprobes {
 		names = append(names, k)
@@ -177,6 +177,7 @@ func NewProbe(g *graph.Graph, manager string, subprobes map[string]Subprobe, lin
 		graph:     g,
 		manager:   manager,
 		subprobes: subprobes,
+		cluster:   cluster,
 		linkers:   linkers,
 		verifiers: verifiers,
 	}

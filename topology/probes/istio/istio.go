@@ -68,7 +68,7 @@ func NewIstioProbe(g *graph.Graph) (*k8s.Probe, error) {
 
 	linkers := k8s.InitLinkers(linkerHandlers, g)
 
-	probe := k8s.NewProbe(g, Manager, k8s.GetSubprobesMap(Manager), linkers, verifiers)
+	probe := k8s.NewProbe(g, Manager, k8s.GetSubprobesMap(Manager), nil, linkers, verifiers)
 
 	probe.AppendNamespaceLinkers(
 		"destinationrule",

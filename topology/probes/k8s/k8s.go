@@ -290,14 +290,13 @@ func newSingleK8sProbe(g *graph.Graph, kubeconfigPath, runtimeManager, clusterNa
 	linkers := InitLinkers(linkerHandlers, g)
 
 	verifiers := []probe.Handler{}
+	clusterSubprobe := initClusterSubprobe(g, runtimeManager, clusterName)
+	clusterProbe, _ := clusterSubprobe.(*clusterCache)
 
 	probe := &K8sProbe{
-		Probe:           NewProbe(g, runtimeManager, subprobes[runtimeManager], linkers, verifiers),
-		clusterSubprobe: initClusterSubprobe(g, runtimeManager, clusterName),
+		Probe:           NewProbe(g, runtimeManager, subprobes[runtimeManager], clusterProbe, linkers, verifiers),
+		clusterSubprobe: clusterSubprobe,
 		cleanupOnStop:   cleanupOnStop,
-	}
-	if clusterProbe, ok := probe.clusterSubprobe.(*clusterCache); ok {
-		PutSubprobe(runtimeManager, Cluster, clusterProbe)
 	}
 
 	probe.AppendClusterLinkers(
