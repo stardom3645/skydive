@@ -55,30 +55,34 @@ func newNodeProbe(client interface{}, g *graph.Graph) Subprobe {
 	return NewResourceCache(client.(*kubernetes.Clientset).CoreV1().RESTClient(), &v1.Node{}, "nodes", g, &nodeHandler{})
 }
 
-func newHostNodeLinker(g *graph.Graph) probe.Handler {
-	nodeProbe := GetSubprobe(Manager, "node")
-	if nodeProbe == nil {
-		return nil
+func newHostNodeLinker(manager string) LinkHandler {
+	return func(g *graph.Graph) probe.Handler {
+		nodeProbe := GetSubprobe(manager, "node")
+		if nodeProbe == nil {
+			return nil
+		}
+
+		hostIndexer := graph.NewMetadataIndexer(g, g, graph.Metadata{"Type": "host"}, "Hostname")
+		hostIndexer.Start()
+
+		nodeIndexer := graph.NewMetadataIndexer(g, nodeProbe, graph.Metadata{"Manager": Manager, "Type": "node"}, MetadataField("Name"))
+		nodeIndexer.Start()
+
+		ml := graph.NewMetadataIndexerLinker(g, hostIndexer, nodeIndexer, NewEdgeMetadata(Manager, "node"))
+
+		linker := &Linker{
+			ResourceLinker: ml.ResourceLinker,
+		}
+		ml.AddEventListener(linker)
+
+		return linker
 	}
-
-	hostIndexer := graph.NewMetadataIndexer(g, g, graph.Metadata{"Type": "host"}, "Hostname")
-	hostIndexer.Start()
-
-	nodeIndexer := graph.NewMetadataIndexer(g, nodeProbe, graph.Metadata{"Type": "node"}, MetadataField("Name"))
-	nodeIndexer.Start()
-
-	ml := graph.NewMetadataIndexerLinker(g, hostIndexer, nodeIndexer, NewEdgeMetadata(Manager, "node"))
-
-	linker := &Linker{
-		ResourceLinker: ml.ResourceLinker,
-	}
-	ml.AddEventListener(linker)
-
-	return linker
 }
 
-func newNodePodLinker(g *graph.Graph) probe.Handler {
-	nodeIndexer := newResourceIndexer(g, Manager, "node", MetadataFields("Name"))
-	podIndexer := newResourceIndexer(g, Manager, "pod", MetadataFields("Node"))
-	return newResourceLinker(g, nodeIndexer, podIndexer, NewEdgeMetadata(Manager, "node"))
+func newNodePodLinker(manager string) LinkHandler {
+	return func(g *graph.Graph) probe.Handler {
+		nodeIndexer := newResourceIndexer(g, manager, "node", MetadataFields("Name"))
+		podIndexer := newResourceIndexer(g, manager, "pod", MetadataFields("Node"))
+		return newResourceLinker(g, nodeIndexer, podIndexer, NewEdgeMetadata(Manager, "node"))
+	}
 }

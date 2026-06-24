@@ -84,8 +84,10 @@ func podPVCAreLinked(a, b interface{}) bool {
 	return false
 }
 
-func newPodPVCLinker(g *graph.Graph) probe.Handler {
-	return NewABLinker(g, Manager, "pod", Manager, "persistentvolumeclaim", podPVCAreLinked)
+func newPodPVCLinker(manager string) LinkHandler {
+	return func(g *graph.Graph) probe.Handler {
+		return NewABLinker(g, manager, "pod", manager, "persistentvolumeclaim", podPVCAreLinked)
+	}
 }
 
 func podConfigMapAreLinked(a, b interface{}) bool {
@@ -119,8 +121,10 @@ func podConfigMapAreLinked(a, b interface{}) bool {
 	return false
 }
 
-func newPodConfigMapLinker(g *graph.Graph) probe.Handler {
-	return NewABLinker(g, Manager, "pod", Manager, "configmap", podConfigMapAreLinked)
+func newPodConfigMapLinker(manager string) LinkHandler {
+	return func(g *graph.Graph) probe.Handler {
+		return NewABLinker(g, manager, "pod", manager, "configmap", podConfigMapAreLinked)
+	}
 }
 
 func podSecretAreLinked(a, b interface{}) bool {
@@ -154,6 +158,8 @@ func podSecretAreLinked(a, b interface{}) bool {
 	return false
 }
 
-func newPodSecretLinker(g *graph.Graph) probe.Handler {
-	return NewABLinker(g, Manager, "pod", Manager, "secret", podSecretAreLinked)
+func newPodSecretLinker(manager string) LinkHandler {
+	return func(g *graph.Graph) probe.Handler {
+		return NewABLinker(g, manager, "pod", manager, "secret", podSecretAreLinked)
+	}
 }

@@ -89,7 +89,7 @@ func NewABLinker(g *graph.Graph, aManager, aType, bManager, bType string, areLin
 	}
 
 	innerLinker := new(ABLinker)
-	innerLinker.manager = aManager
+	innerLinker.manager = Manager
 	innerLinker.typeA = aType
 	innerLinker.typeB = bType
 	innerLinker.graph = g

@@ -127,9 +127,8 @@ func CleanupK8sGraph(g *graph.Graph) {
 }
 
 func ResetK8sRuntimeState() {
-	resetSubprobes(Manager)
+	resetAllSubprobes()
 	resetKubeCaches()
-	clusterNode = nil
 }
 
 func newObjectIndexerFromFilter(g *graph.Graph, h graph.ListenerHandler, filter *filters.Filter, indexes ...string) *graph.MetadataIndexer {
@@ -147,8 +146,19 @@ func newResourceIndexer(g *graph.Graph, manager, ty string, attrs []string) *gra
 	if cache == nil {
 		return nil
 	}
-	metadata := graph.Metadata{"Manager": manager, "Type": ty}
-	indexer := graph.NewMetadataIndexer(g, cache, metadata, attrs...)
+	indexes := append([]string{}, attrs...)
+	hasClusterName := false
+	for _, index := range indexes {
+		if index == ClusterNameField {
+			hasClusterName = true
+			break
+		}
+	}
+	if !hasClusterName {
+		indexes = append(indexes, ClusterNameField)
+	}
+	metadata := graph.Metadata{"Manager": Manager, "Type": ty}
+	indexer := graph.NewMetadataIndexer(g, cache, metadata, indexes...)
 	indexer.Start()
 	return indexer
 }

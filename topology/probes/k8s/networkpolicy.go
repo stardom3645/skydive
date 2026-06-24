@@ -290,28 +290,30 @@ func (npl *networkPolicyLinker) GetBALinks(podNode *graph.Node) (edges []*graph.
 	return
 }
 
-func newNetworkPolicyLinker(g *graph.Graph) probe.Handler {
-	npProbe := GetSubprobe(Manager, "networkpolicy")
-	podProbe := GetSubprobe(Manager, "pod")
-	namespaceProbe := GetSubprobe(Manager, "namespace")
-	if npProbe == nil || podProbe == nil || namespaceProbe == nil {
-		return nil
+func newNetworkPolicyLinker(manager string) LinkHandler {
+	return func(g *graph.Graph) probe.Handler {
+		npProbe := GetSubprobe(manager, "networkpolicy")
+		podProbe := GetSubprobe(manager, "pod")
+		namespaceProbe := GetSubprobe(manager, "namespace")
+		if npProbe == nil || podProbe == nil || namespaceProbe == nil {
+			return nil
+		}
+
+		npLinker := &networkPolicyLinker{
+			graph:          g,
+			npCache:        npProbe.(*ResourceCache),
+			podCache:       podProbe.(*ResourceCache),
+			namespaceCache: namespaceProbe.(*ResourceCache),
+		}
+
+		rl := graph.NewResourceLinker(g, []graph.ListenerHandler{npProbe}, []graph.ListenerHandler{podProbe},
+			npLinker, graph.Metadata{"RelationType": "networkpolicy"})
+
+		linker := &Linker{
+			ResourceLinker: rl,
+		}
+		rl.AddEventListener(linker)
+
+		return linker
 	}
-
-	npLinker := &networkPolicyLinker{
-		graph:          g,
-		npCache:        npProbe.(*ResourceCache),
-		podCache:       podProbe.(*ResourceCache),
-		namespaceCache: namespaceProbe.(*ResourceCache),
-	}
-
-	rl := graph.NewResourceLinker(g, []graph.ListenerHandler{npProbe}, []graph.ListenerHandler{podProbe},
-		npLinker, graph.Metadata{"RelationType": "networkpolicy"})
-
-	linker := &Linker{
-		ResourceLinker: rl,
-	}
-	rl.AddEventListener(linker)
-
-	return linker
 }

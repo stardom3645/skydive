@@ -36,6 +36,7 @@ type containerProbe struct {
 	*KubeCache
 	graph            *graph.Graph
 	containerIndexer *graph.MetadataIndexer
+	clusterName      string
 }
 
 func (c *containerProbe) newMetadata(pod *v1.Pod, container *v1.Container) graph.Metadata {
@@ -43,7 +44,11 @@ func (c *containerProbe) newMetadata(pod *v1.Pod, container *v1.Container) graph
 	m.SetField("Pod", pod.Name)
 	m.SetField("Name", container.Name)
 	m.SetField("Image", container.Image)
-	return NewMetadata(Manager, "container", m, container, container.Name)
+	metadata := NewMetadata(Manager, "container", m, container, container.Name)
+	if len(c.clusterName) > 0 {
+		metadata.SetField(ClusterNameField, c.clusterName)
+	}
+	return metadata
 }
 
 func (c *containerProbe) dump(pod *v1.Pod, name string) string {
@@ -90,7 +95,7 @@ func (c *containerProbe) OnAdd(obj interface{}) {
 			wasUpdated[container.Name] = true
 		}
 
-		nodes, _ := c.containerIndexer.Get(pod.Namespace, pod.Name)
+		nodes, _ := c.containerIndexer.Get(pod.Namespace, pod.Name, c.clusterName)
 		for _, node := range nodes {
 			name, _ := node.GetFieldString(MetadataField("Name"))
 			if !wasUpdated[name] {
@@ -118,7 +123,7 @@ func (c *containerProbe) OnDelete(obj interface{}) {
 		c.graph.Lock()
 		defer c.graph.Unlock()
 
-		containerNodes, _ := c.containerIndexer.Get(pod.Namespace, pod.Name)
+		containerNodes, _ := c.containerIndexer.Get(pod.Namespace, pod.Name, c.clusterName)
 		for _, containerNode := range containerNodes {
 			name, _ := containerNode.GetFieldString(MetadataField("Name"))
 			if err := c.graph.DelNode(containerNode); err != nil {
@@ -138,16 +143,22 @@ func newContainerProbe(client interface{}, g *graph.Graph) Subprobe {
 	}
 
 	containerFilter := newTypesFilter(Manager, "container")
-	c.containerIndexer = newObjectIndexerFromFilter(g, c, containerFilter, MetadataFields("Namespace", "Pod")...)
+	c.containerIndexer = newObjectIndexerFromFilter(g, c, containerFilter, append(MetadataFields("Namespace", "Pod"), ClusterNameField)...)
 	c.containerIndexer.Start()
 	c.KubeCache = RegisterKubeCache(client.(*kubernetes.Clientset).CoreV1().RESTClient(), &v1.Pod{}, "pods", c)
 	return c
 }
 
-func newPodContainerLinker(g *graph.Graph) probe.Handler {
-	podIndexer := newResourceIndexer(g, Manager, "pod", MetadataFields("Namespace", "Name"))
-	containerIndexer := newResourceIndexer(g, Manager, "container", MetadataFields("Namespace", "Pod"))
-	return newResourceLinker(g, podIndexer, containerIndexer, topology.OwnershipMetadata())
+func (c *containerProbe) SetClusterName(clusterName string) {
+	c.clusterName = clusterName
+}
+
+func newPodContainerLinker(manager string) LinkHandler {
+	return func(g *graph.Graph) probe.Handler {
+		podIndexer := newResourceIndexer(g, manager, "pod", MetadataFields("Namespace", "Name"))
+		containerIndexer := newResourceIndexer(g, manager, "container", MetadataFields("Namespace", "Pod"))
+		return newResourceLinker(g, podIndexer, containerIndexer, topology.OwnershipMetadata())
+	}
 }
 
 func newDockerIndexer(g *graph.Graph) *graph.MetadataIndexer {
@@ -158,25 +169,27 @@ func newDockerIndexer(g *graph.Graph) *graph.MetadataIndexer {
 	return graph.NewMetadataIndexer(g, g, m, "Container.ID")
 }
 
-func newContainerDockerLinker(g *graph.Graph) probe.Handler {
-	containerProbe := GetSubprobe(Manager, "container")
-	if containerProbe == nil {
-		return nil
+func newContainerDockerLinker(manager string) LinkHandler {
+	return func(g *graph.Graph) probe.Handler {
+		containerProbe := GetSubprobe(manager, "container")
+		if containerProbe == nil {
+			return nil
+		}
+
+		containerFilter := newTypesFilter(Manager, "container")
+		containerIndexer := newObjectIndexerFromFilter(g, containerProbe, containerFilter, MetadataFields("ContainerID")...)
+		containerIndexer.Start()
+
+		dockerIndexer := newDockerIndexer(g)
+		dockerIndexer.Start()
+
+		ml := graph.NewMetadataIndexerLinker(g, containerIndexer, dockerIndexer, NewEdgeMetadata(Manager, "container"))
+
+		linker := &Linker{
+			ResourceLinker: ml.ResourceLinker,
+		}
+		ml.AddEventListener(linker)
+
+		return linker
 	}
-
-	containerFilter := newTypesFilter(Manager, "container")
-	containerIndexer := newObjectIndexerFromFilter(g, containerProbe, containerFilter, MetadataFields("ContainerID")...)
-	containerIndexer.Start()
-
-	dockerIndexer := newDockerIndexer(g)
-	dockerIndexer.Start()
-
-	ml := graph.NewMetadataIndexerLinker(g, containerIndexer, dockerIndexer, NewEdgeMetadata(Manager, "container"))
-
-	linker := &Linker{
-		ResourceLinker: ml.ResourceLinker,
-	}
-	ml.AddEventListener(linker)
-
-	return linker
 }

@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/skydive-project/skydive/config"
@@ -36,6 +37,12 @@ import (
 type K8sProbe struct {
 	*Probe
 	clusterSubprobe Subprobe
+	cleanupOnStop   bool
+}
+
+type MultiK8sProbe struct {
+	graph  *graph.Graph
+	probes []*K8sProbe
 }
 
 // Start the k8s probe
@@ -62,6 +69,40 @@ func (p *K8sProbe) Stop() {
 		return
 	}
 	p.Probe.Stop()
+	if p.cleanupOnStop {
+		CleanupK8sGraph(p.graph)
+		ResetK8sRuntimeState()
+	}
+}
+
+func (p *MultiK8sProbe) Start() error {
+	if p == nil {
+		return nil
+	}
+	for _, child := range p.probes {
+		if err := child.Start(); err != nil {
+			for _, started := range p.probes {
+				if started == child {
+					break
+				}
+				started.Stop()
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *MultiK8sProbe) Stop() {
+	if p == nil {
+		return
+	}
+	for _, child := range p.probes {
+		if child == nil {
+			continue
+		}
+		child.Stop()
+	}
 	CleanupK8sGraph(p.graph)
 	ResetK8sRuntimeState()
 }
@@ -112,12 +153,17 @@ func moldKubernetesSelectionEnabled() bool {
 		return false
 	}
 	var state struct {
-		Enabled bool `json:"enabled"`
+		Enabled    bool     `json:"enabled"`
+		ClusterIDs []string `json:"clusterIds"`
+		ClusterID  string   `json:"clusterId"`
 	}
 	if err := json.Unmarshal(data, &state); err != nil {
 		return false
 	}
-	return state.Enabled
+	if !state.Enabled {
+		return false
+	}
+	return len(normalizeClusterIDs(state.ClusterIDs, state.ClusterID)) > 0
 }
 
 func shouldSkipMissingKubeconfig(kubeconfigPath string) bool {
@@ -133,17 +179,54 @@ func ShouldSkipK8sProbe() bool {
 	if !moldKubernetesSelectionEnabled() {
 		return true
 	}
-	return shouldSkipMissingKubeconfig(config.GetString("analyzer.topology.k8s.config_file"))
+	entries := moldKubernetesSelectedClusterEntries()
+	if len(entries) == 0 {
+		return shouldSkipMissingKubeconfig(config.GetString("analyzer.topology.k8s.config_file"))
+	}
+	for _, entry := range entries {
+		if !shouldSkipMissingKubeconfig(entry.Path) {
+			return false
+		}
+	}
+	return true
 }
 
 // NewK8sProbe returns a new Kubernetes probe
-func NewK8sProbe(g *graph.Graph) (*K8sProbe, error) {
+func NewK8sProbe(g *graph.Graph) (probe.Handler, error) {
 	if ShouldSkipK8sProbe() {
 		return nil, nil
 	}
 	CleanupK8sGraph(g)
 	ResetK8sRuntimeState()
-	kubeconfigPath := config.GetString("analyzer.topology.k8s.config_file")
+
+	entries := moldKubernetesSelectedClusterEntries()
+	if len(entries) == 0 {
+		defaultPath := config.GetString("analyzer.topology.k8s.config_file")
+		entries = []moldKubernetesClusterEntry{{Path: defaultPath}}
+	}
+
+	if len(entries) == 1 {
+		return newSingleK8sProbe(g, entries[0].Path, Manager, entries[0].Name, true)
+	}
+
+	probes := make([]*K8sProbe, 0, len(entries))
+	for index, entry := range entries {
+		runtimeManager := fmt.Sprintf("%s#%d", Manager, index)
+		child, err := newSingleK8sProbe(g, entry.Path, runtimeManager, entry.Name, false)
+		if err != nil {
+			return nil, err
+		}
+		if child != nil {
+			probes = append(probes, child)
+		}
+	}
+	if len(probes) == 0 {
+		return nil, nil
+	}
+	return &MultiK8sProbe{graph: g, probes: probes}, nil
+}
+
+func newSingleK8sProbe(g *graph.Graph, kubeconfigPath, runtimeManager, clusterNameOverride string, cleanupOnStop bool) (*K8sProbe, error) {
 	enabledSubprobes := config.GetStringSlice("analyzer.topology.k8s.probes")
 
 	clientconfig, kubeconfig, err := NewConfig(kubeconfigPath)
@@ -156,7 +239,7 @@ func NewK8sProbe(g *graph.Graph) (*K8sProbe, error) {
 		return nil, fmt.Errorf("Failed to create Kubernetes client: %s", err)
 	}
 
-	clusterName := getClusterName(kubeconfig)
+	clusterName := getClusterName(kubeconfig, clusterNameOverride)
 
 	subprobeHandlers := map[string]SubprobeHandler{
 		"configmap":             newConfigMapProbe,
@@ -181,27 +264,27 @@ func NewK8sProbe(g *graph.Graph) (*K8sProbe, error) {
 		"storageclass":          newStorageClassProbe,
 	}
 
-	InitSubprobes(enabledSubprobes, subprobeHandlers, clientset, g, Manager, clusterName)
+	InitSubprobes(enabledSubprobes, subprobeHandlers, clientset, g, runtimeManager, clusterName)
 
 	linkerHandlers := []LinkHandler{
-		newContainerDockerLinker,
-		newReplicaSetPodLinker,
-		newDeploymentReplicaSetLinker,
-		newDaemonSetPodLinker,
-		newPodContainerLinker,
-		newPodConfigMapLinker,
-		newPodSecretLinker,
-		newHostNodeLinker,
-		newNodePodLinker,
-		newIngressServiceLinker,
-		newNetworkPolicyLinker,
-		newServiceEndpointsLinker,
-		newServicePodLinker,
-		newStatefulSetPodLinker,
-		newPodPVCLinker,
-		newPVPVCLinker,
-		newStorageClassPVCLinker,
-		newStorageClassPVLinker,
+		newContainerDockerLinker(runtimeManager),
+		newReplicaSetPodLinker(runtimeManager),
+		newDeploymentReplicaSetLinker(runtimeManager),
+		newDaemonSetPodLinker(runtimeManager),
+		newPodContainerLinker(runtimeManager),
+		newPodConfigMapLinker(runtimeManager),
+		newPodSecretLinker(runtimeManager),
+		newHostNodeLinker(runtimeManager),
+		newNodePodLinker(runtimeManager),
+		newIngressServiceLinker(runtimeManager),
+		newNetworkPolicyLinker(runtimeManager),
+		newServiceEndpointsLinker(runtimeManager),
+		newServicePodLinker(runtimeManager),
+		newStatefulSetPodLinker(runtimeManager),
+		newPodPVCLinker(runtimeManager),
+		newPVPVCLinker(runtimeManager),
+		newStorageClassPVCLinker(runtimeManager),
+		newStorageClassPVLinker(runtimeManager),
 	}
 
 	linkers := InitLinkers(linkerHandlers, g)
@@ -209,8 +292,12 @@ func NewK8sProbe(g *graph.Graph) (*K8sProbe, error) {
 	verifiers := []probe.Handler{}
 
 	probe := &K8sProbe{
-		Probe:           NewProbe(g, Manager, subprobes[Manager], linkers, verifiers),
-		clusterSubprobe: initClusterSubprobe(g, Manager, clusterName),
+		Probe:           NewProbe(g, runtimeManager, subprobes[runtimeManager], linkers, verifiers),
+		clusterSubprobe: initClusterSubprobe(g, runtimeManager, clusterName),
+		cleanupOnStop:   cleanupOnStop,
+	}
+	if clusterProbe, ok := probe.clusterSubprobe.(*clusterCache); ok {
+		PutSubprobe(runtimeManager, Cluster, clusterProbe)
 	}
 
 	probe.AppendClusterLinkers(
@@ -241,8 +328,11 @@ func NewK8sProbe(g *graph.Graph) (*K8sProbe, error) {
 	return probe, nil
 }
 
-func getClusterName(kubeconfig *clientcmd.ClientConfig) string {
+func getClusterName(kubeconfig *clientcmd.ClientConfig, clusterNameOverride string) string {
 	if clusterName := strings.TrimSpace(config.GetString("analyzer.topology.k8s.cluster_name")); clusterName != "" {
+		return clusterName
+	}
+	if clusterName := strings.TrimSpace(clusterNameOverride); clusterName != "" {
 		return clusterName
 	}
 	if clusterName := moldKubernetesSelectedClusterName(); clusterName != "" {
@@ -261,6 +351,86 @@ func getClusterName(kubeconfig *clientcmd.ClientConfig) string {
 		}
 	}
 	return clusterName
+}
+
+type moldKubernetesClusterEntry struct {
+	ID   string
+	Name string
+	Path string
+}
+
+func normalizeClusterIDs(ids []string, fallback string) []string {
+	normalized := make([]string, 0, len(ids)+1)
+	seen := make(map[string]bool)
+	appendID := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			return
+		}
+		seen[id] = true
+		normalized = append(normalized, id)
+	}
+	for _, id := range ids {
+		appendID(id)
+	}
+	appendID(fallback)
+	return normalized
+}
+
+func moldKubernetesSelectedClusterEntries() []moldKubernetesClusterEntry {
+	stateFile := config.GetString("mold.kubernetes.stateFile")
+	if strings.TrimSpace(stateFile) == "" {
+		return nil
+	}
+	data, err := os.ReadFile(stateFile)
+	if err != nil {
+		return nil
+	}
+	var state struct {
+		Enabled      bool     `json:"enabled"`
+		ClusterIDs   []string `json:"clusterIds"`
+		ClusterNames []string `json:"clusterNames"`
+		ClusterID    string   `json:"clusterId"`
+		ClusterName  string   `json:"clusterName"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil || !state.Enabled {
+		return nil
+	}
+
+	ids := normalizeClusterIDs(state.ClusterIDs, state.ClusterID)
+	if len(ids) == 0 {
+		return nil
+	}
+	names := state.ClusterNames
+	if len(names) == 0 && strings.TrimSpace(state.ClusterName) != "" {
+		names = []string{state.ClusterName}
+	}
+	entries := make([]moldKubernetesClusterEntry, 0, len(ids))
+	basePath := config.GetString("analyzer.topology.k8s.config_file")
+	for index, id := range ids {
+		entry := moldKubernetesClusterEntry{
+			ID:   id,
+			Path: filepath.Join(filepath.Dir(basePath), sanitizeClusterFileName(id)+".kubeconfig"),
+		}
+		if index < len(names) {
+			entry.Name = strings.TrimSpace(names[index])
+		}
+		entries = append(entries, entry)
+	}
+	return entries
+}
+
+func sanitizeClusterFileName(value string) string {
+	value = strings.TrimSpace(value)
+	var b strings.Builder
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('_')
+		}
+	}
+	return b.String()
 }
 
 func moldKubernetesSelectedClusterName() string {

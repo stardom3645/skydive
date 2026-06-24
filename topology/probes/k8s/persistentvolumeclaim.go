@@ -61,6 +61,8 @@ func pvPVCAreLinked(a, b interface{}) bool {
 	return pvc.Spec.VolumeName == pv.Name
 }
 
-func newPVPVCLinker(g *graph.Graph) probe.Handler {
-	return NewABLinker(g, Manager, "persistentvolumeclaim", Manager, "persistentvolume", pvPVCAreLinked)
+func newPVPVCLinker(manager string) LinkHandler {
+	return func(g *graph.Graph) probe.Handler {
+		return NewABLinker(g, manager, "persistentvolumeclaim", manager, "persistentvolume", pvPVCAreLinked)
+	}
 }

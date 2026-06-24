@@ -49,6 +49,10 @@ func resetSubprobes(manager string) {
 	subprobes[manager] = make(map[string]Subprobe)
 }
 
+func resetAllSubprobes() {
+	subprobes = make(map[string]map[string]Subprobe)
+}
+
 // PutSubprobe puts a new subprobe in the subprobes map
 func PutSubprobe(manager, name string, subprobe Subprobe) {
 	subprobes[manager][name] = subprobe
@@ -67,7 +71,7 @@ func GetSubprobesMap(manager string) map[string]Subprobe {
 // ListSubprobes returns the list of Subprobe as ListernerHandler
 func ListSubprobes(manager string, types ...string) (handlers []graph.ListenerHandler) {
 	for _, t := range types {
-		if subprobe := GetSubprobe(Manager, t); subprobe != nil {
+		if subprobe := GetSubprobe(manager, t); subprobe != nil {
 			handlers = append(handlers, subprobe)
 		}
 	}
@@ -149,7 +153,8 @@ func (p *Probe) Stop() {
 
 // AppendClusterLinkers appends newly created cluster linker per type
 func (p *Probe) AppendClusterLinkers(types ...string) {
-	if clusterLinker := newClusterLinker(p.graph, p.manager, types...); clusterLinker != nil {
+	clusterProbe, _ := p.subprobes[Cluster].(*clusterCache)
+	if clusterLinker := newClusterLinker(p.graph, p.manager, clusterProbe, types...); clusterLinker != nil {
 		p.linkers = append(p.linkers, clusterLinker)
 	}
 }
@@ -197,6 +202,9 @@ func InitSubprobes(enabled []string, subprobeHandlers map[string]SubprobeHandler
 			subprobe := handler(client, g)
 			if resourceCache, ok := subprobe.(*ResourceCache); ok {
 				resourceCache.clusterName = clusterName
+			}
+			if clusterAware, ok := subprobe.(interface{ SetClusterName(string) }); ok {
+				clusterAware.SetClusterName(clusterName)
 			}
 
 			PutSubprobe(manager, name, subprobe)

@@ -83,8 +83,10 @@ func servicePodAreLinked(a, b interface{}) bool {
 	return MatchNamespace(pod, service) && matchMapSelector(pod, service.Spec.Selector, false)
 }
 
-func newServicePodLinker(g *graph.Graph) probe.Handler {
-	return NewABLinker(g, Manager, "service", Manager, "pod", servicePodAreLinked)
+func newServicePodLinker(manager string) LinkHandler {
+	return func(g *graph.Graph) probe.Handler {
+		return NewABLinker(g, manager, "service", manager, "pod", servicePodAreLinked)
+	}
 }
 
 func serviceEndpointsAreLinked(a, b interface{}) bool {
@@ -93,6 +95,8 @@ func serviceEndpointsAreLinked(a, b interface{}) bool {
 	return MatchNamespace(endpoints, service) && (endpoints.Name == service.Name || matchMapSelector(endpoints, service.Spec.Selector, false))
 }
 
-func newServiceEndpointsLinker(g *graph.Graph) probe.Handler {
-	return NewABLinker(g, Manager, "service", Manager, "endpoints", serviceEndpointsAreLinked)
+func newServiceEndpointsLinker(manager string) LinkHandler {
+	return func(g *graph.Graph) probe.Handler {
+		return NewABLinker(g, manager, "service", manager, "endpoints", serviceEndpointsAreLinked)
+	}
 }

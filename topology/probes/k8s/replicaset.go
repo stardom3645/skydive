@@ -23,8 +23,8 @@ import (
 
 	"github.com/skydive-project/skydive/graffiti/graph"
 
-	v1 "k8s.io/api/core/v1"
 	v1apps "k8s.io/api/apps/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -52,6 +52,8 @@ func replicaSetPodAreLinked(a, b interface{}) bool {
 	return MatchNamespace(pod, rc) && matchLabelSelector(pod, rc.Spec.Selector)
 }
 
-func newReplicaSetPodLinker(g *graph.Graph) probe.Handler {
-	return NewABLinker(g, Manager, "replicaset", Manager, "pod", replicaSetPodAreLinked)
+func newReplicaSetPodLinker(manager string) LinkHandler {
+	return func(g *graph.Graph) probe.Handler {
+		return NewABLinker(g, manager, "replicaset", manager, "pod", replicaSetPodAreLinked)
+	}
 }

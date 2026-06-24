@@ -18,6 +18,7 @@
 package k8s
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -132,10 +133,11 @@ func resetKubeCaches() {
 
 // RegisterKubeCache registers resource handler to kubernetes events.
 func RegisterKubeCache(restClient rest.Interface, objType runtime.Object, resources string, handler k8sHandler) *KubeCache {
-	if _, ok := kubeCacheMap[resources]; !ok {
-		kubeCacheMap[resources] = NewKubeCache(restClient, objType, resources)
+	key := fmt.Sprintf("%p:%s", restClient, resources)
+	if _, ok := kubeCacheMap[key]; !ok {
+		kubeCacheMap[key] = NewKubeCache(restClient, objType, resources)
 	}
-	c := kubeCacheMap[resources]
+	c := kubeCacheMap[key]
 
 	c.handlers = append(c.handlers, handler)
 

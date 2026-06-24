@@ -26,12 +26,11 @@ import (
 
 const Cluster = "cluster"
 
-var clusterNode *graph.Node
-
 type clusterCache struct {
 	*graph.EventHandler
 	graph       *graph.Graph
 	clusterName string
+	node        *graph.Node
 }
 
 func (c *clusterCache) addClusterNode() error {
@@ -45,12 +44,12 @@ func (c *clusterCache) addClusterNode() error {
 	if len(c.clusterName) > 0 {
 		metadata.SetField(ClusterNameField, c.clusterName)
 	}
-	clusterNode, err = c.graph.NewNode(graph.GenID(), metadata)
+	c.node, err = c.graph.NewNode(graph.GenID(), metadata)
 	if err != nil {
 		return err
 	}
 
-	c.NotifyEvent(graph.NodeAdded, clusterNode)
+	c.NotifyEvent(graph.NodeAdded, c.node)
 	logging.GetLogger().Infof("Added cluster{Name: %s}", c.clusterName)
 	return nil
 }
@@ -82,6 +81,7 @@ type clusterLinker struct {
 	*graph.ResourceLinker
 	g             *graph.Graph
 	objectIndexer *graph.MetadataIndexer
+	clusterProbe  *clusterCache
 }
 
 func (linker *clusterLinker) createEdge(cluster, object *graph.Node) *graph.Edge {
@@ -91,19 +91,22 @@ func (linker *clusterLinker) createEdge(cluster, object *graph.Node) *graph.Edge
 
 // GetBALinks returns all the incoming links for a node
 func (linker *clusterLinker) GetBALinks(objectNode *graph.Node) (edges []*graph.Edge) {
-	if !isTheSameCluster(clusterNode, objectNode) {
+	if linker.clusterProbe == nil || linker.clusterProbe.node == nil {
 		return
 	}
-	edges = append(edges, linker.createEdge(clusterNode, objectNode))
+	if !isTheSameCluster(linker.clusterProbe.node, objectNode) {
+		return
+	}
+	edges = append(edges, linker.createEdge(linker.clusterProbe.node, objectNode))
 	return
 }
 
-func newClusterLinker(g *graph.Graph, manager string, types ...string) probe.Handler {
+func newClusterLinker(g *graph.Graph, manager string, clusterProbe *clusterCache, types ...string) probe.Handler {
 	rl := graph.NewResourceLinker(
 		g,
 		nil,
 		ListSubprobes(manager, types...),
-		&clusterLinker{g: g},
+		&clusterLinker{g: g, clusterProbe: clusterProbe},
 		topology.OwnershipMetadata(),
 	)
 

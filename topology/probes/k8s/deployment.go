@@ -58,6 +58,8 @@ func deploymentReplicaSetAreLinked(a, b interface{}) bool {
 	return MatchNamespace(replicaset, deployment) && matchLabelSelector(replicaset, deployment.Spec.Selector)
 }
 
-func newDeploymentReplicaSetLinker(g *graph.Graph) probe.Handler {
-	return NewABLinker(g, Manager, "deployment", Manager, "replicaset", deploymentReplicaSetAreLinked)
+func newDeploymentReplicaSetLinker(manager string) LinkHandler {
+	return func(g *graph.Graph) probe.Handler {
+		return NewABLinker(g, manager, "deployment", manager, "replicaset", deploymentReplicaSetAreLinked)
+	}
 }

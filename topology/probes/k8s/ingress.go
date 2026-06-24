@@ -75,6 +75,8 @@ func ingressServiceAreLinked(a, b interface{}) bool {
 	return false
 }
 
-func newIngressServiceLinker(g *graph.Graph) probe.Handler {
-	return NewABLinker(g, Manager, "ingress", Manager, "service", ingressServiceAreLinked)
+func newIngressServiceLinker(manager string) LinkHandler {
+	return func(g *graph.Graph) probe.Handler {
+		return NewABLinker(g, manager, "ingress", manager, "service", ingressServiceAreLinked)
+	}
 }

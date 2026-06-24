@@ -62,6 +62,8 @@ func statefulSetPodAreLinked(a, b interface{}) bool {
 	return MatchNamespace(pod, statefulset) && matchLabelSelector(pod, statefulset.Spec.Selector)
 }
 
-func newStatefulSetPodLinker(g *graph.Graph) probe.Handler {
-	return NewABLinker(g, Manager, "statefulset", Manager, "pod", statefulSetPodAreLinked)
+func newStatefulSetPodLinker(manager string) LinkHandler {
+	return func(g *graph.Graph) probe.Handler {
+		return NewABLinker(g, manager, "statefulset", manager, "pod", statefulSetPodAreLinked)
+	}
 }

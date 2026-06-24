@@ -55,8 +55,10 @@ func storageClassPVCAreLinked(a, b interface{}) bool {
 	return pvc.Spec.StorageClassName != nil && sc.Name == *pvc.Spec.StorageClassName
 }
 
-func newStorageClassPVCLinker(g *graph.Graph) probe.Handler {
-	return NewABLinker(g, Manager, "storageclass", Manager, "persistentvolumeclaim", storageClassPVCAreLinked)
+func newStorageClassPVCLinker(manager string) LinkHandler {
+	return func(g *graph.Graph) probe.Handler {
+		return NewABLinker(g, manager, "storageclass", manager, "persistentvolumeclaim", storageClassPVCAreLinked)
+	}
 }
 
 func storageClassPVAreLinked(a, b interface{}) bool {
@@ -65,6 +67,8 @@ func storageClassPVAreLinked(a, b interface{}) bool {
 	return pv.Spec.StorageClassName == sc.Name
 }
 
-func newStorageClassPVLinker(g *graph.Graph) probe.Handler {
-	return NewABLinker(g, Manager, "storageclass", Manager, "persistentvolume", storageClassPVAreLinked)
+func newStorageClassPVLinker(manager string) LinkHandler {
+	return func(g *graph.Graph) probe.Handler {
+		return NewABLinker(g, manager, "storageclass", manager, "persistentvolume", storageClassPVAreLinked)
+	}
 }

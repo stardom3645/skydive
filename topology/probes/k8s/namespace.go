@@ -51,11 +51,11 @@ func newNamespaceProbe(client interface{}, g *graph.Graph) Subprobe {
 
 func newNamespaceLinker(g *graph.Graph, manager string, types ...string) probe.Handler {
 	namespaceFilter := newTypesFilter(Manager, "namespace")
-	namespaceIndexer := newObjectIndexerFromFilter(g, GetSubprobe(Manager, "namespace"), namespaceFilter, MetadataFields("Name")...)
+	namespaceIndexer := newObjectIndexerFromFilter(g, GetSubprobe(manager, "namespace"), namespaceFilter, append(MetadataFields("Name"), ClusterNameField)...)
 	namespaceIndexer.Start()
 
-	objectFilter := newTypesFilter(manager, types...)
-	objectIndexer := newObjectIndexerFromFilter(g, g, objectFilter, MetadataFields("Namespace")...)
+	objectFilter := newTypesFilter(Manager, types...)
+	objectIndexer := newObjectIndexerFromFilter(g, g, objectFilter, append(MetadataFields("Namespace"), ClusterNameField)...)
 	objectIndexer.Start()
 
 	ml := graph.NewMetadataIndexerLinker(g, namespaceIndexer, objectIndexer, topology.OwnershipMetadata())

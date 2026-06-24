@@ -38,23 +38,28 @@ type moldKubernetesCluster struct {
 }
 
 type moldKubernetesSelection struct {
-	Enabled     bool      `json:"enabled"`
-	ClusterID   string    `json:"clusterId,omitempty"`
-	ClusterName string    `json:"clusterName,omitempty"`
-	APIServer   string    `json:"apiServer,omitempty"`
-	UpdatedAt   time.Time `json:"updatedAt,omitempty"`
+	Enabled      bool      `json:"enabled"`
+	ClusterID    string    `json:"clusterId,omitempty"`
+	ClusterName  string    `json:"clusterName,omitempty"`
+	APIServer    string    `json:"apiServer,omitempty"`
+	ClusterIDs   []string  `json:"clusterIds,omitempty"`
+	ClusterNames []string  `json:"clusterNames,omitempty"`
+	APIServers   []string  `json:"apiServers,omitempty"`
+	UpdatedAt    time.Time `json:"updatedAt,omitempty"`
 }
 
 type moldKubernetesClustersResponse struct {
 	Clusters       []moldKubernetesCluster `json:"clusters"`
 	SelectedID     string                  `json:"selectedId,omitempty"`
+	SelectedIDs    []string                `json:"selectedIds,omitempty"`
 	KubeconfigPath string                  `json:"kubeconfigPath"`
 	RestartNeeded  bool                    `json:"restartNeeded"`
 	ProbeRunning   bool                    `json:"probeRunning"`
 }
 
 type moldKubernetesSelectRequest struct {
-	ID string `json:"id"`
+	ID  string   `json:"id"`
+	IDs []string `json:"ids"`
 }
 
 type moldKubernetesTestRequest struct {
@@ -90,9 +95,12 @@ func handleMoldKubernetesClusters(w http.ResponseWriter, r *http.Request, isProb
 	}
 
 	selection, _ := readMoldKubernetesSelection()
+	selectedIDs := normalizedSelectionClusterIDs(selection)
 	selectedID := ""
 	if selection.Enabled && isMoldKubernetesSelectionCurrent(selection, clusters) {
-		selectedID = selection.ClusterID
+		if len(selectedIDs) > 0 {
+			selectedID = selectedIDs[0]
+		}
 	} else if selection.Enabled {
 		staleSelection := selection
 		selection = moldKubernetesSelection{Enabled: false, UpdatedAt: time.Now().UTC()}
@@ -101,19 +109,21 @@ func handleMoldKubernetesClusters(w http.ResponseWriter, r *http.Request, isProb
 		if stopProbe != nil {
 			go stopProbe()
 		}
+		selectedIDs = nil
 	}
 	probeRunning := false
 	if isProbeRunning != nil {
 		probeRunning = isProbeRunning()
 	}
 	for i := range clusters {
-		clusters[i].CollectionEnabled = selection.Enabled && clusters[i].ID == selection.ClusterID
+		clusters[i].CollectionEnabled = selection.Enabled && containsString(selectedIDs, clusters[i].ID)
 		clusters[i].CollectionRunning = clusters[i].CollectionEnabled && probeRunning
 	}
 
 	writeJSON(w, moldKubernetesClustersResponse{
 		Clusters:       clusters,
 		SelectedID:     selectedID,
+		SelectedIDs:    selectedIDs,
 		KubeconfigPath: moldKubernetesKubeconfigPath(),
 		RestartNeeded:  false,
 		ProbeRunning:   probeRunning,
@@ -130,7 +140,8 @@ func handleMoldKubernetesSelect(w http.ResponseWriter, r *http.Request, startPro
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	if strings.TrimSpace(req.ID) == "" {
+	selectedIDs := normalizeClusterIDs(req.IDs, req.ID)
+	if len(selectedIDs) == 0 {
 		http.Error(w, "cluster id is required", http.StatusBadRequest)
 		return
 	}
@@ -140,45 +151,65 @@ func handleMoldKubernetesSelect(w http.ResponseWriter, r *http.Request, startPro
 		writeMoldKubernetesError(w, err)
 		return
 	}
-	var selected *moldKubernetesCluster
+	clusterByID := make(map[string]moldKubernetesCluster, len(clusters))
 	for i := range clusters {
-		if clusters[i].ID == req.ID {
-			selected = &clusters[i]
-			break
-		}
+		clusterByID[clusters[i].ID] = clusters[i]
 	}
-	if selected == nil {
-		http.Error(w, "cluster not found", http.StatusNotFound)
-		return
+	selectedClusters := make([]moldKubernetesCluster, 0, len(selectedIDs))
+	for _, id := range selectedIDs {
+		selected, ok := clusterByID[id]
+		if !ok {
+			http.Error(w, "cluster not found", http.StatusNotFound)
+			return
+		}
+		selectedClusters = append(selectedClusters, selected)
 	}
 
-	kubeconfig, err := getMoldKubernetesConfig(req.ID)
-	if err != nil {
-		writeMoldKubernetesError(w, err)
-		return
-	}
-	clusterPath := moldKubernetesClusterKubeconfigPath(req.ID)
-	if err := writeSecureFile(clusterPath, []byte(kubeconfig)); err != nil {
-		http.Error(w, "failed to save kubeconfig", http.StatusInternalServerError)
-		return
+	previousSelection, _ := readMoldKubernetesSelection()
+	clusterNames := make([]string, 0, len(selectedClusters))
+	apiServers := make([]string, 0, len(selectedClusters))
+	var activeKubeconfig []byte
+	for index, selected := range selectedClusters {
+		kubeconfig, err := getMoldKubernetesConfig(selected.ID)
+		if err != nil {
+			writeMoldKubernetesError(w, err)
+			return
+		}
+		clusterPath := moldKubernetesClusterKubeconfigPath(selected.ID)
+		if err := writeSecureFile(clusterPath, []byte(kubeconfig)); err != nil {
+			http.Error(w, "failed to save kubeconfig", http.StatusInternalServerError)
+			return
+		}
+		if index == 0 {
+			activeKubeconfig = []byte(kubeconfig)
+		}
+		clusterNames = append(clusterNames, selected.Name)
+		apiServers = append(apiServers, selected.APIServer)
 	}
 	path := moldKubernetesKubeconfigPath()
-	if path != clusterPath {
-		if err := writeSecureFile(path, []byte(kubeconfig)); err != nil {
+	if len(activeKubeconfig) > 0 {
+		if err := writeSecureFile(path, activeKubeconfig); err != nil {
 			http.Error(w, "failed to save active kubeconfig", http.StatusInternalServerError)
 			return
 		}
 	}
 
 	selection := moldKubernetesSelection{
-		Enabled:     true,
-		ClusterID:   selected.ID,
-		ClusterName: selected.Name,
-		APIServer:   selected.APIServer,
-		UpdatedAt:   time.Now().UTC(),
+		Enabled:      true,
+		ClusterID:    selectedClusters[0].ID,
+		ClusterName:  selectedClusters[0].Name,
+		APIServer:    selectedClusters[0].APIServer,
+		ClusterIDs:   selectedIDs,
+		ClusterNames: clusterNames,
+		APIServers:   apiServers,
+		UpdatedAt:    time.Now().UTC(),
 	}
 	if err := writeMoldKubernetesSelection(selection); err != nil {
 		http.Error(w, "failed to save collection state", http.StatusInternalServerError)
+		return
+	}
+	if err := removeDeselectedKubernetesManagedKubeconfigs(previousSelection, selection); err != nil {
+		http.Error(w, "failed to clean stale kubeconfigs", http.StatusInternalServerError)
 		return
 	}
 
@@ -486,19 +517,24 @@ func firstNonEmpty(values ...string) string {
 }
 
 func isMoldKubernetesSelectionCurrent(selection moldKubernetesSelection, clusters []moldKubernetesCluster) bool {
-	if !selection.Enabled || strings.TrimSpace(selection.ClusterID) == "" {
+	selectedIDs := normalizedSelectionClusterIDs(selection)
+	if !selection.Enabled || len(selectedIDs) == 0 {
 		return false
 	}
+	apisByID := make(map[string]string, len(clusters))
 	for _, cluster := range clusters {
-		if cluster.ID != selection.ClusterID {
-			continue
-		}
-		if strings.TrimSpace(selection.APIServer) != "" && strings.TrimSpace(cluster.APIServer) != "" && selection.APIServer != cluster.APIServer {
+		apisByID[cluster.ID] = cluster.APIServer
+	}
+	for index, id := range selectedIDs {
+		apiServer, ok := apisByID[id]
+		if !ok {
 			return false
 		}
-		return true
+		if index < len(selection.APIServers) && strings.TrimSpace(selection.APIServers[index]) != "" && strings.TrimSpace(apiServer) != "" && selection.APIServers[index] != apiServer {
+			return false
+		}
 	}
-	return false
+	return true
 }
 
 func moldKubernetesKubeconfigPath() string {
@@ -523,8 +559,8 @@ func removeMoldKubernetesManagedKubeconfigs(selection moldKubernetesSelection) e
 		return nil
 	}
 	paths := []string{moldKubernetesKubeconfigPath()}
-	if strings.TrimSpace(selection.ClusterID) != "" {
-		paths = append(paths, moldKubernetesClusterKubeconfigPath(selection.ClusterID))
+	for _, clusterID := range normalizedSelectionClusterIDs(selection) {
+		paths = append(paths, moldKubernetesClusterKubeconfigPath(clusterID))
 	}
 	seen := make(map[string]bool)
 	for _, path := range paths {
@@ -533,6 +569,23 @@ func removeMoldKubernetesManagedKubeconfigs(selection moldKubernetesSelection) e
 			continue
 		}
 		seen[path] = true
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+func removeDeselectedKubernetesManagedKubeconfigs(previous, current moldKubernetesSelection) error {
+	currentSet := make(map[string]bool)
+	for _, id := range normalizedSelectionClusterIDs(current) {
+		currentSet[id] = true
+	}
+	for _, id := range normalizedSelectionClusterIDs(previous) {
+		if currentSet[id] {
+			continue
+		}
+		path := moldKubernetesClusterKubeconfigPath(id)
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
@@ -595,11 +648,60 @@ func readMoldKubernetesSelection() (moldKubernetesSelection, error) {
 }
 
 func writeMoldKubernetesSelection(selection moldKubernetesSelection) error {
+	selection.ClusterIDs = normalizedSelectionClusterIDs(selection)
+	if len(selection.ClusterIDs) == 0 {
+		selection.ClusterID = ""
+		selection.ClusterName = ""
+		selection.APIServer = ""
+		selection.ClusterNames = nil
+		selection.APIServers = nil
+	} else {
+		selection.ClusterID = selection.ClusterIDs[0]
+		if len(selection.ClusterNames) > 0 {
+			selection.ClusterName = selection.ClusterNames[0]
+		}
+		if len(selection.APIServers) > 0 {
+			selection.APIServer = selection.APIServers[0]
+		}
+	}
 	data, err := json.MarshalIndent(selection, "", "  ")
 	if err != nil {
 		return err
 	}
 	return writeSecureFile(moldKubernetesStatePath(), data)
+}
+
+func normalizedSelectionClusterIDs(selection moldKubernetesSelection) []string {
+	return normalizeClusterIDs(selection.ClusterIDs, selection.ClusterID)
+}
+
+func normalizeClusterIDs(ids []string, fallback ...string) []string {
+	normalized := make([]string, 0, len(ids)+len(fallback))
+	seen := make(map[string]bool)
+	appendID := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			return
+		}
+		seen[id] = true
+		normalized = append(normalized, id)
+	}
+	for _, id := range ids {
+		appendID(id)
+	}
+	for _, id := range fallback {
+		appendID(id)
+	}
+	return normalized
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func writeSecureFile(path string, data []byte) error {
