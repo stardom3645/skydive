@@ -83,114 +83,47 @@ func handleWallHostTrend(w http.ResponseWriter, r *http.Request) {
 
 	end := time.Now()
 	start := end.Add(-trendRange)
-	prometheusHost := firstNonEmptyString(managementIP, ip, host, name)
 	prometheusJob := firstNonEmptyString(strings.TrimSpace(r.URL.Query().Get("job")), "cube")
 	prometheusPort := firstNonEmptyString(strings.TrimSpace(r.URL.Query().Get("port")), "3003")
-	prometheusInstance := prometheusHost + ":" + prometheusPort
-	diskDeviceFilter := `device!~"loop.*|ram.*|fd.*|sr.*|dm-.*|zram.*"`
-	networkDeviceFilter := `device!~"lo|veth.*|docker.*|br.*|virbr.*|tap.*"`
-
-	queries := []wallHostTrendSeries{
-		{
-			Key:   "cpu",
-			Label: "CPU Usage",
-			Unit:  "percent",
-			Query: fmt.Sprintf(
-				`sum (sum by (mode) (irate(node_cpu_seconds_total{instance="%s", job="%s", mode=~"(irq|nice|softirq|steal|system|user|iowait)"}[1m])) / scalar(sum(irate(node_cpu_seconds_total{instance="%s", job="%s"}[1m]))) * 100)`,
-				prometheusInstance,
-				prometheusJob,
-				prometheusInstance,
-				prometheusJob,
-			),
-		},
-		{
-			Key:   "memory",
-			Label: "Memory Usage",
-			Unit:  "percent",
-			Query: fmt.Sprintf(
-				`(1 - (node_memory_MemAvailable_bytes{instance="%s", job="%s"} / node_memory_MemTotal_bytes{instance="%s", job="%s"})) * 100`,
-				prometheusInstance,
-				prometheusJob,
-				prometheusInstance,
-				prometheusJob,
-			),
-		},
-		{
-			Key:   "storageIops",
-			Label: "Storage IOPS",
-			Unit:  "iops",
-			Query: fmt.Sprintf(
-				`sum(rate(node_disk_reads_completed_total{instance="%s", job="%s", %s}[1m]) + rate(node_disk_writes_completed_total{instance="%s", job="%s", %s}[1m]))`,
-				prometheusInstance,
-				prometheusJob,
-				diskDeviceFilter,
-				prometheusInstance,
-				prometheusJob,
-				diskDeviceFilter,
-			),
-		},
-		{
-			Key:   "networkRx",
-			Label: "RX",
-			Unit:  "bps",
-			Query: fmt.Sprintf(
-				`sum(rate(node_network_receive_bytes_total{instance="%s", job="%s", %s}[1m])) * 8`,
-				prometheusInstance,
-				prometheusJob,
-				networkDeviceFilter,
-			),
-		},
-		{
-			Key:   "networkTx",
-			Label: "TX",
-			Unit:  "bps",
-			Query: fmt.Sprintf(
-				`sum(rate(node_network_transmit_bytes_total{instance="%s", job="%s", %s}[1m])) * 8`,
-				prometheusInstance,
-				prometheusJob,
-				networkDeviceFilter,
-			),
-		},
-		{
-			Key:   "networkDrops",
-			Label: "Network Drops",
-			Unit:  "count",
-			Query: fmt.Sprintf(
-				`sum(increase(node_network_receive_drop_total{instance="%s", job="%s", %s}[1m]) + increase(node_network_transmit_drop_total{instance="%s", job="%s", %s}[1m]) + increase(node_network_receive_errs_total{instance="%s", job="%s", %s}[1m]) + increase(node_network_transmit_errs_total{instance="%s", job="%s", %s}[1m]))`,
-				prometheusInstance,
-				prometheusJob,
-				networkDeviceFilter,
-				prometheusInstance,
-				prometheusJob,
-				networkDeviceFilter,
-				prometheusInstance,
-				prometheusJob,
-				networkDeviceFilter,
-				prometheusInstance,
-				prometheusJob,
-				networkDeviceFilter,
-			),
-		},
-	}
+	prometheusInstances := prometheusInstanceCandidates(prometheusPort, managementIP, ip, host, name)
 
 	prometheusURL := wallPrometheusURL()
 	client := &http.Client{Timeout: 10 * time.Second}
-	series := make([]wallHostTrendSeries, 0, len(queries))
+	queryTemplates := wallHostTrendQueryTemplates()
+	series := make([]wallHostTrendSeries, 0, len(queryTemplates))
 	warnings := make([]string, 0)
 
-	for _, item := range queries {
-		result, err := queryPrometheusRange(client, prometheusURL, item.Query, start, end, step)
-		if err != nil {
-			warnings = append(warnings, fmt.Sprintf("%s query failed: %s", item.Key, err.Error()))
-			item.Values = []wallHostTrendPoint{}
-			series = append(series, item)
-			continue
+	for _, item := range queryTemplates {
+		var lastErr error
+
+		for _, instance := range prometheusInstances {
+			item.Query = wallHostTrendQuery(item.Key, instance, prometheusJob)
+			result, err := queryPrometheusRange(client, prometheusURL, item.Query, start, end, step)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+
+			points, labels := pickPrometheusSeries(result)
+			if len(points) == 0 {
+				continue
+			}
+
+			item.Values = points
+			item.Labels = labels
+			item.LastValue = lastTrendValue(points)
+			break
 		}
 
-		points, labels := pickPrometheusSeries(result)
-		item.Values = points
-		item.Labels = labels
-		item.LastValue = lastTrendValue(points)
+		if item.Values == nil {
+			item.Values = []wallHostTrendPoint{}
+			if lastErr != nil {
+				warnings = append(warnings, fmt.Sprintf("%s query failed: %s", item.Key, lastErr.Error()))
+			} else {
+				warnings = append(warnings, fmt.Sprintf("%s data not found for instances: %s", item.Key, strings.Join(prometheusInstances, ", ")))
+			}
+		}
+
 		series = append(series, item)
 	}
 
@@ -204,6 +137,83 @@ func handleWallHostTrend(w http.ResponseWriter, r *http.Request) {
 		Series:   series,
 		Warnings: warnings,
 	})
+}
+
+func wallHostTrendQueryTemplates() []wallHostTrendSeries {
+	return []wallHostTrendSeries{
+		{Key: "cpu", Label: "CPU Usage", Unit: "percent"},
+		{Key: "memory", Label: "Memory Usage", Unit: "percent"},
+		{Key: "storageIops", Label: "Storage IOPS", Unit: "iops"},
+		{Key: "networkRx", Label: "RX", Unit: "bps"},
+		{Key: "networkTx", Label: "TX", Unit: "bps"},
+		{Key: "networkDrops", Label: "Network Drops", Unit: "count"},
+	}
+}
+
+func wallHostTrendQuery(key, prometheusInstance, prometheusJob string) string {
+	diskDeviceFilter := `device!~"loop.*|ram.*|fd.*|sr.*|dm-.*|zram.*"`
+	networkDeviceFilter := `device!~"lo|veth.*|docker.*|br.*|virbr.*|tap.*"`
+
+	switch key {
+	case "cpu":
+		return fmt.Sprintf(
+			`sum (sum by (mode) (irate(node_cpu_seconds_total{instance="%s", job="%s", mode=~"(irq|nice|softirq|steal|system|user|iowait)"}[1m])) / scalar(sum(irate(node_cpu_seconds_total{instance="%s", job="%s"}[1m]))) * 100)`,
+			prometheusInstance,
+			prometheusJob,
+			prometheusInstance,
+			prometheusJob,
+		)
+	case "memory":
+		return fmt.Sprintf(
+			`(1 - (node_memory_MemAvailable_bytes{instance="%s", job="%s"} / node_memory_MemTotal_bytes{instance="%s", job="%s"})) * 100`,
+			prometheusInstance,
+			prometheusJob,
+			prometheusInstance,
+			prometheusJob,
+		)
+	case "storageIops":
+		return fmt.Sprintf(
+			`sum(rate(node_disk_reads_completed_total{instance="%s", job="%s", %s}[1m]) + rate(node_disk_writes_completed_total{instance="%s", job="%s", %s}[1m]))`,
+			prometheusInstance,
+			prometheusJob,
+			diskDeviceFilter,
+			prometheusInstance,
+			prometheusJob,
+			diskDeviceFilter,
+		)
+	case "networkRx":
+		return fmt.Sprintf(
+			`sum(rate(node_network_receive_bytes_total{instance="%s", job="%s", %s}[1m])) * 8`,
+			prometheusInstance,
+			prometheusJob,
+			networkDeviceFilter,
+		)
+	case "networkTx":
+		return fmt.Sprintf(
+			`sum(rate(node_network_transmit_bytes_total{instance="%s", job="%s", %s}[1m])) * 8`,
+			prometheusInstance,
+			prometheusJob,
+			networkDeviceFilter,
+		)
+	case "networkDrops":
+		return fmt.Sprintf(
+			`sum(increase(node_network_receive_drop_total{instance="%s", job="%s", %s}[1m]) + increase(node_network_transmit_drop_total{instance="%s", job="%s", %s}[1m]) + increase(node_network_receive_errs_total{instance="%s", job="%s", %s}[1m]) + increase(node_network_transmit_errs_total{instance="%s", job="%s", %s}[1m]))`,
+			prometheusInstance,
+			prometheusJob,
+			networkDeviceFilter,
+			prometheusInstance,
+			prometheusJob,
+			networkDeviceFilter,
+			prometheusInstance,
+			prometheusJob,
+			networkDeviceFilter,
+			prometheusInstance,
+			prometheusJob,
+			networkDeviceFilter,
+		)
+	default:
+		return ""
+	}
 }
 
 func queryPrometheusRange(client *http.Client, prometheusURL, query string, start, end time.Time, step time.Duration) (*prometheusQueryRangeResponse, error) {
@@ -342,6 +352,51 @@ func wallPrometheusURL() string {
 		}
 	}
 	return defaultWallPrometheusURL
+}
+
+func prometheusInstanceCandidates(port string, values ...string) []string {
+	hosts := make([]string, 0, len(values)*3)
+	for _, value := range values {
+		for _, item := range strings.Split(value, ",") {
+			host := normalizePrometheusHostCandidate(item)
+			if host == "" {
+				continue
+			}
+			hosts = append(hosts, host)
+			lower := strings.ToLower(host)
+			if lower != host {
+				hosts = append(hosts, lower)
+			}
+			if short := strings.Split(host, ".")[0]; short != host {
+				hosts = append(hosts, short)
+				hosts = append(hosts, strings.ToLower(short))
+			}
+		}
+	}
+
+	hosts = uniqueNonEmptyStrings(hosts...)
+	instances := make([]string, 0, len(hosts))
+	for _, host := range hosts {
+		if strings.Contains(host, ":") {
+			instances = append(instances, host)
+			continue
+		}
+		instances = append(instances, host+":"+port)
+	}
+
+	return uniqueNonEmptyStrings(instances...)
+}
+
+func normalizePrometheusHostCandidate(value string) string {
+	host := strings.TrimSpace(value)
+	if host == "" {
+		return ""
+	}
+	if slash := strings.Index(host, "/"); slash >= 0 {
+		host = strings.TrimSpace(host[:slash])
+	}
+	host = strings.Trim(host, "[]")
+	return host
 }
 
 func parseDurationOrDefault(value string, fallback time.Duration) time.Duration {
