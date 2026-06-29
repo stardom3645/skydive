@@ -49,7 +49,7 @@ func LoadVMDetailMapFromCloudstack() {
 		LEFT JOIN user_vm uv ON uv.id = v.id
 		LEFT JOIN host h ON h.id = v.host_id
 		LEFT JOIN guest_os go ON go.id = uv.guest_os_id
-		LEFT JOIN service_offering so ON so.id = uv.service_offering_id
+		LEFT JOIN service_offering so ON so.id = v.service_offering_id
 		WHERE v.removed IS NULL
 		ORDER BY v.id DESC`
 
