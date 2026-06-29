@@ -412,10 +412,13 @@ func NewServerFromConfig() (*Server, error) {
 	common.LoadVMNetworkMapFromCloudstack()
 	vmNetworkRefreshInterval := time.Duration(config.GetInt("mold.vmNetworkMap.refreshInterval")) * time.Second
 	common.StartVMNetworkMapAutoRefresh(vmNetworkRefreshInterval)
+	common.LoadVMDetailMapFromCloudstack()
+	common.StartVMDetailMapAutoRefresh(vmNetworkRefreshInterval)
 
 	// API 등록
 	api.RegisterVmNameMapAPI(httpServer, common.GetVmNameMap)
 	api.RegisterVMNetworkMapAPI(httpServer, common.GetVMNetworkMap, vmNetworkRefreshInterval)
+	api.RegisterVMDetailMapAPI(httpServer, common.GetVMDetailMap, vmNetworkRefreshInterval)
 	api.RegisterMoldVMConsoleAPI(httpServer)
 	api.RegisterMoldKubernetesAPI(httpServer, startMoldKubernetesProbe(g, probeBundle), stopMoldKubernetesProbe(probeBundle), isMoldKubernetesProbeRunning(probeBundle))
 	api.RegisterMoldHostDetailAPI(httpServer)
