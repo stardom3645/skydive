@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -62,6 +63,7 @@ type prometheusQueryRangeResponse struct {
 
 func RegisterWallHostTrendAPI(httpServer *shttp.Server) {
 	httpServer.Router.HandleFunc("/api/wall/hosts/trend", handleWallHostTrend).Methods("GET")
+	httpServer.Router.HandleFunc("/api/wall/vms/trend", handleWallVMTrend).Methods("GET")
 }
 
 func handleWallHostTrend(w http.ResponseWriter, r *http.Request) {
@@ -129,6 +131,72 @@ func handleWallHostTrend(w http.ResponseWriter, r *http.Request) {
 
 	writeWallHostTrendJSON(w, http.StatusOK, wallHostTrendResponse{
 		Host:     firstNonEmptyString(host, name, managementIP, ip),
+		Range:    trendRange.String(),
+		Step:     step.String(),
+		Start:    start.Unix(),
+		End:      end.Unix(),
+		PromURL:  prometheusURL,
+		Series:   series,
+		Warnings: warnings,
+	})
+}
+
+func handleWallVMTrend(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimSpace(r.URL.Query().Get("name"))
+	domain := strings.TrimSpace(r.URL.Query().Get("domain"))
+	instanceName := strings.TrimSpace(r.URL.Query().Get("instanceName"))
+	vmID := firstNonEmptyString(strings.TrimSpace(r.URL.Query().Get("vmId")), strings.TrimSpace(r.URL.Query().Get("id")))
+	uuid := strings.TrimSpace(r.URL.Query().Get("uuid"))
+	displayName := strings.TrimSpace(r.URL.Query().Get("displayName"))
+	domainCandidates := vmDomainCandidates(domain, instanceName, name, vmID, uuid, displayName)
+
+	if len(domainCandidates) == 0 {
+		writeWallHostTrendError(w, http.StatusBadRequest, "name, domain, instanceName, vmId or uuid is required.")
+		return
+	}
+
+	trendRange := parseDurationOrDefault(r.URL.Query().Get("range"), defaultTrendRange)
+	step := parseDurationOrDefault(r.URL.Query().Get("step"), defaultTrendStep)
+	if step < 30*time.Second {
+		step = 30 * time.Second
+	}
+
+	end := time.Now()
+	start := end.Add(-trendRange)
+	domainRegex := prometheusRegexAlternation(domainCandidates...)
+
+	prometheusURL := wallPrometheusURL()
+	client := &http.Client{Timeout: 10 * time.Second}
+	queryTemplates := wallHostTrendQueryTemplates()
+	series := make([]wallHostTrendSeries, 0, len(queryTemplates))
+	warnings := make([]string, 0)
+
+	for _, item := range queryTemplates {
+		item.Query = wallVMTrendQuery(item.Key, domainRegex)
+		result, err := queryPrometheusRange(client, prometheusURL, item.Query, start, end, step)
+		if err != nil {
+			item.Values = []wallHostTrendPoint{}
+			warnings = append(warnings, fmt.Sprintf("%s query failed: %s", item.Key, err.Error()))
+			series = append(series, item)
+			continue
+		}
+
+		points, labels := pickPrometheusSeries(result)
+		if len(points) == 0 {
+			item.Values = []wallHostTrendPoint{}
+			warnings = append(warnings, fmt.Sprintf("%s data not found for domains: %s", item.Key, strings.Join(domainCandidates, ", ")))
+			series = append(series, item)
+			continue
+		}
+
+		item.Values = points
+		item.Labels = labels
+		item.LastValue = lastTrendValue(points)
+		series = append(series, item)
+	}
+
+	writeWallHostTrendJSON(w, http.StatusOK, wallHostTrendResponse{
+		Host:     firstNonEmptyString(domain, instanceName, name, vmID, uuid, displayName),
 		Range:    trendRange.String(),
 		Step:     step.String(),
 		Start:    start.Unix(),
@@ -210,6 +278,47 @@ func wallHostTrendQuery(key, prometheusInstance, prometheusJob string) string {
 			prometheusInstance,
 			prometheusJob,
 			networkDeviceFilter,
+		)
+	default:
+		return ""
+	}
+}
+
+func wallVMTrendQuery(key, domainRegex string) string {
+	switch key {
+	case "cpu":
+		return fmt.Sprintf(
+			`avg(rate(libvirt_domain_info_cpu_time_seconds_total{domain=~"%s"}[1m]) / on (domain, instance) count(libvirt_domain_vcpu_cpu{}) by (instance, domain) * 100)`,
+			domainRegex,
+		)
+	case "memory":
+		return fmt.Sprintf(
+			`avg(libvirt_domain_memory_stats_used_percent{domain=~"%s"})`,
+			domainRegex,
+		)
+	case "storageIops":
+		return fmt.Sprintf(
+			`sum(rate(libvirt_domain_block_stats_read_requests_total{domain=~"%s"}[1m]) + rate(libvirt_domain_block_stats_write_requests_total{domain=~"%s"}[1m]))`,
+			domainRegex,
+			domainRegex,
+		)
+	case "networkRx":
+		return fmt.Sprintf(
+			`sum(rate(libvirt_domain_interface_stats_receive_bytes_total{domain=~"%s"}[1m])) * 8`,
+			domainRegex,
+		)
+	case "networkTx":
+		return fmt.Sprintf(
+			`sum(rate(libvirt_domain_interface_stats_transmit_bytes_total{domain=~"%s"}[1m])) * 8`,
+			domainRegex,
+		)
+	case "networkDrops":
+		return fmt.Sprintf(
+			`sum(increase(libvirt_domain_interface_stats_receive_drops_total{domain=~"%s"}[1m]) + increase(libvirt_domain_interface_stats_transmit_drops_total{domain=~"%s"}[1m]) + increase(libvirt_domain_interface_stats_receive_errors_total{domain=~"%s"}[1m]) + increase(libvirt_domain_interface_stats_transmit_errors_total{domain=~"%s"}[1m]))`,
+			domainRegex,
+			domainRegex,
+			domainRegex,
+			domainRegex,
 		)
 	default:
 		return ""
@@ -397,6 +506,36 @@ func normalizePrometheusHostCandidate(value string) string {
 	}
 	host = strings.Trim(host, "[]")
 	return host
+}
+
+func vmDomainCandidates(values ...string) []string {
+	candidates := make([]string, 0, len(values)*2)
+	for _, value := range values {
+		for _, item := range strings.Split(value, ",") {
+			cleaned := strings.TrimSpace(item)
+			if cleaned == "" {
+				continue
+			}
+			candidates = append(candidates, cleaned)
+			lower := strings.ToLower(cleaned)
+			if lower != cleaned {
+				candidates = append(candidates, lower)
+			}
+		}
+	}
+	return uniqueNonEmptyStrings(candidates...)
+}
+
+func prometheusRegexAlternation(values ...string) string {
+	values = uniqueNonEmptyStrings(values...)
+	escaped := make([]string, 0, len(values))
+	for _, value := range values {
+		escaped = append(escaped, regexp.QuoteMeta(value))
+	}
+	if len(escaped) == 0 {
+		return "$^"
+	}
+	return strings.Join(escaped, "|")
 }
 
 func parseDurationOrDefault(value string, fallback time.Duration) time.Duration {
