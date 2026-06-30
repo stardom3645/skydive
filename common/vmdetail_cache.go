@@ -112,20 +112,34 @@ func buildVMDetailMapQuery(db *sql.DB) string {
 		}
 	}
 
-	cpuExpr := moldCoalesceExpression("v", vmColumns, []string{"cpu", "cpus", "cpu_number", "cpu_count"}, "''")
-	memoryExpr := moldCoalesceExpression("v", vmColumns, []string{"memory", "ram_size", "max_memory", "memory_total"}, "''")
+	cpuCandidates := []string{}
+	memoryCandidates := []string{}
+	if join, ok := moldVMDetailTableJoin(db, "user_vm_details", "uvd"); ok {
+		joins = append(joins, join)
+		cpuCandidates = append(cpuCandidates, "uvd.cpu_number")
+		memoryCandidates = append(memoryCandidates, "uvd.memory")
+	}
+	if join, ok := moldVMDetailTableJoin(db, "vm_details", "vmd"); ok {
+		joins = append(joins, join)
+		cpuCandidates = append(cpuCandidates, "vmd.cpu_number")
+		memoryCandidates = append(memoryCandidates, "vmd.memory")
+	}
+	cpuCandidates = append(cpuCandidates, moldColumnExpressions("v", vmColumns, []string{"cpu", "cpus", "cpu_number", "cpu_count"})...)
+	memoryCandidates = append(memoryCandidates, moldColumnExpressions("v", vmColumns, []string{"memory", "ram_size", "max_memory", "memory_total"})...)
 	if len(serviceOfferingColumns) > 0 {
 		switch {
 		case vmColumns["service_offering_id"]:
 			joins = append(joins, "LEFT JOIN service_offering so ON so.id = v.service_offering_id")
-			cpuExpr = moldCoalesceExpression("so", serviceOfferingColumns, []string{"cpu", "cpus", "cpu_number", "cpu_count"}, cpuExpr)
-			memoryExpr = moldCoalesceExpression("so", serviceOfferingColumns, []string{"ram_size", "memory", "max_memory", "memory_total"}, memoryExpr)
+			cpuCandidates = append(cpuCandidates, moldColumnExpressions("so", serviceOfferingColumns, []string{"cpu", "cpus", "cpu_number", "cpu_count"})...)
+			memoryCandidates = append(memoryCandidates, moldColumnExpressions("so", serviceOfferingColumns, []string{"ram_size", "memory", "max_memory", "memory_total"})...)
 		case userVMColumns["service_offering_id"]:
 			joins = append(joins, "LEFT JOIN service_offering so ON so.id = uv.service_offering_id")
-			cpuExpr = moldCoalesceExpression("so", serviceOfferingColumns, []string{"cpu", "cpus", "cpu_number", "cpu_count"}, cpuExpr)
-			memoryExpr = moldCoalesceExpression("so", serviceOfferingColumns, []string{"ram_size", "memory", "max_memory", "memory_total"}, memoryExpr)
+			cpuCandidates = append(cpuCandidates, moldColumnExpressions("so", serviceOfferingColumns, []string{"cpu", "cpus", "cpu_number", "cpu_count"})...)
+			memoryCandidates = append(memoryCandidates, moldColumnExpressions("so", serviceOfferingColumns, []string{"ram_size", "memory", "max_memory", "memory_total"})...)
 		}
 	}
+	cpuExpr := moldCoalesceNonZeroExpression(cpuCandidates, "''")
+	memoryExpr := moldCoalesceNonZeroExpression(memoryCandidates, "''")
 
 	uuidExpr := moldCoalesceExpression("v", vmColumns, []string{"uuid"}, moldCoalesceExpression("uv", userVMColumns, []string{"uuid"}, "''"))
 	instanceNameExpr := moldCoalesceExpression("v", vmColumns, []string{"instance_name"}, "''")
@@ -188,6 +202,63 @@ func moldTableColumns(db *sql.DB, table string) map[string]bool {
 		}
 	}
 	return columns
+}
+
+func moldVMDetailTableJoin(db *sql.DB, table, alias string) (string, bool) {
+	columns := moldTableColumns(db, table)
+	if len(columns) == 0 || !columns["name"] || !columns["value"] {
+		return "", false
+	}
+
+	idColumn := ""
+	for _, candidate := range []string{"vm_id", "resource_id", "instance_id"} {
+		if columns[candidate] {
+			idColumn = candidate
+			break
+		}
+	}
+	if idColumn == "" {
+		return "", false
+	}
+
+	query := fmt.Sprintf(`LEFT JOIN (
+			SELECT %s AS vm_id,
+			       MAX(CASE WHEN LOWER(name) IN ('cpunumber', 'cpu_number', 'cpus', 'cpu', 'cpu_count') THEN value END) AS cpu_number,
+			       MAX(CASE WHEN LOWER(name) IN ('memory', 'ram_size', 'ram', 'memorymb', 'memory_mb', 'memory_total') THEN value END) AS memory
+			FROM %s
+			GROUP BY %s
+		) %s ON %s.vm_id = v.id`, idColumn, table, idColumn, alias, alias)
+
+	return query, true
+}
+
+func moldColumnExpressions(alias string, columns map[string]bool, candidates []string) []string {
+	expressions := []string{}
+	for _, column := range candidates {
+		if columns[strings.ToLower(column)] {
+			expressions = append(expressions, alias+"."+column)
+		}
+	}
+	return expressions
+}
+
+func moldCoalesceNonZeroExpression(expressions []string, fallback string) string {
+	normalized := []string{}
+	for _, expression := range expressions {
+		cleaned := strings.TrimSpace(expression)
+		if cleaned == "" || cleaned == "''" {
+			continue
+		}
+		normalized = append(normalized, fmt.Sprintf("NULLIF(NULLIF(%s, ''), '0')", cleaned))
+	}
+	if fallback != "" && fallback != "''" {
+		normalized = append(normalized, fallback)
+	}
+	if len(normalized) == 0 {
+		return "''"
+	}
+	normalized = append(normalized, "''")
+	return "COALESCE(" + strings.Join(normalized, ", ") + ")"
 }
 
 func moldCoalesceExpression(alias string, columns map[string]bool, candidates []string, fallback string) string {
