@@ -12,12 +12,16 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/skydive-project/skydive/common"
 	"github.com/skydive-project/skydive/config"
 	shttp "github.com/skydive-project/skydive/graffiti/http"
+	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
@@ -33,8 +37,108 @@ type moldKubernetesCluster struct {
 	Name              string `json:"name"`
 	State             string `json:"state"`
 	APIServer         string `json:"apiServer"`
+	Description       string `json:"description,omitempty"`
+	ZoneName          string `json:"zoneName,omitempty"`
+	Version           string `json:"version,omitempty"`
+	ControlNodes      int64  `json:"controlNodes,omitempty"`
+	WorkerNodes       int64  `json:"workerNodes,omitempty"`
+	Cores             int64  `json:"cores,omitempty"`
+	MemoryMB          int64  `json:"memoryMb,omitempty"`
+	NetworkName       string `json:"networkName,omitempty"`
+	ServiceOffering   string `json:"serviceOffering,omitempty"`
+	IPAddress         string `json:"ipAddress,omitempty"`
+	Autoscaling       bool   `json:"autoscaling,omitempty"`
+	MinSize           int64  `json:"minSize,omitempty"`
+	MaxSize           int64  `json:"maxSize,omitempty"`
+	Created           string `json:"created,omitempty"`
 	CollectionEnabled bool   `json:"collectionEnabled"`
 	CollectionRunning bool   `json:"collectionRunning"`
+}
+
+type kubernetesStatusCount struct {
+	Total    int `json:"total"`
+	Ready    int `json:"ready,omitempty"`
+	NotReady int `json:"notReady,omitempty"`
+	Running  int `json:"running,omitempty"`
+	Pending  int `json:"pending,omitempty"`
+	Failed   int `json:"failed,omitempty"`
+	Unknown  int `json:"unknown,omitempty"`
+}
+
+type kubernetesResourceSummary struct {
+	CapacityCPUCores       float64 `json:"capacityCpuCores,omitempty"`
+	AllocatableCPUCores    float64 `json:"allocatableCpuCores,omitempty"`
+	CapacityMemoryBytes    int64   `json:"capacityMemoryBytes,omitempty"`
+	AllocatableMemoryBytes int64   `json:"allocatableMemoryBytes,omitempty"`
+	RequestsCPUCores       float64 `json:"requestsCpuCores,omitempty"`
+	LimitsCPUCores         float64 `json:"limitsCpuCores,omitempty"`
+	RequestsMemoryBytes    int64   `json:"requestsMemoryBytes,omitempty"`
+	LimitsMemoryBytes      int64   `json:"limitsMemoryBytes,omitempty"`
+	UsageCPUCores          float64 `json:"usageCpuCores,omitempty"`
+	UsageMemoryBytes       int64   `json:"usageMemoryBytes,omitempty"`
+	CPUUsagePercent        float64 `json:"cpuUsagePercent,omitempty"`
+	MemoryUsagePercent     float64 `json:"memoryUsagePercent,omitempty"`
+	MetricsAvailable       bool    `json:"metricsAvailable"`
+}
+
+type kubernetesRiskItem struct {
+	Severity string `json:"severity"`
+	Title    string `json:"title"`
+	Message  string `json:"message"`
+	Count    int    `json:"count,omitempty"`
+}
+
+type kubernetesRecentChange struct {
+	Time     time.Time `json:"time"`
+	Resource string    `json:"resource"`
+	Message  string    `json:"message"`
+	Severity string    `json:"severity"`
+}
+
+type moldKubernetesClusterSummary struct {
+	Cluster                            moldKubernetesCluster         `json:"cluster"`
+	ClusterID                          string                        `json:"clusterId"`
+	ClusterUID                         string                        `json:"clusterUid,omitempty"`
+	APIServer                          string                        `json:"apiServer,omitempty"`
+	Version                            string                        `json:"version,omitempty"`
+	KubernetesVersion                  string                        `json:"kubernetesVersion,omitempty"`
+	APIConnectionStatus                kubernetesAPIConnectionStatus `json:"apiConnectionStatus"`
+	LastSyncAt                         *time.Time                    `json:"lastSyncAt,omitempty"`
+	ControlPlane                       kubernetesStatusCount         `json:"controlPlane"`
+	ControlPlaneReady                  int                           `json:"controlPlaneReady"`
+	ControlPlaneTotal                  int                           `json:"controlPlaneTotal"`
+	Nodes                              kubernetesStatusCount         `json:"nodes"`
+	NodeReady                          int                           `json:"nodeReady"`
+	NodeTotal                          int                           `json:"nodeTotal"`
+	Namespaces                         int                           `json:"namespaces"`
+	NamespaceCount                     int                           `json:"namespaceCount"`
+	Pods                               kubernetesStatusCount         `json:"pods"`
+	PodRunning                         int                           `json:"podRunning"`
+	PodPending                         int                           `json:"podPending"`
+	PodFailed                          int                           `json:"podFailed"`
+	Services                           int                           `json:"services"`
+	ServiceCount                       int                           `json:"serviceCount"`
+	Resources                          kubernetesResourceSummary     `json:"resources"`
+	Risks                              []kubernetesRiskItem          `json:"risks"`
+	RecentChanges                      []kubernetesRecentChange      `json:"recentChanges"`
+	AffectedServices                   int                           `json:"affectedServices"`
+	CurrentlyImpactedServiceCount      int                           `json:"currentlyImpactedServiceCount"`
+	ExternalPathCount                  int                           `json:"externalPathCount"`
+	ExternalPathDetails                []string                      `json:"externalPathDetails,omitempty"`
+	ImpactScore                        int                           `json:"impactScore"`
+	CurrentImpactScore                 int                           `json:"currentImpactScore"`
+	InfrastructureRiskScore            int                           `json:"infrastructureRiskScore"`
+	SingleControlPlane                 bool                          `json:"singleControlPlane"`
+	SingleReplicaWorkloadCount         int                           `json:"singleReplicaWorkloadCount"`
+	SingleNodeEndpointServiceCount     int                           `json:"singleNodeEndpointServiceCount"`
+	LocalStorageDependentWorkloadCount int                           `json:"localStorageDependentWorkloadCount"`
+	CollectedAt                        time.Time                     `json:"collectedAt"`
+}
+
+type kubernetesNodeMetricsList struct {
+	Items []struct {
+		Usage corev1.ResourceList `json:"usage"`
+	} `json:"items"`
 }
 
 type moldKubernetesSelection struct {
@@ -212,6 +316,7 @@ func handleMoldKubernetesSelect(w http.ResponseWriter, r *http.Request, startPro
 		http.Error(w, "failed to clean stale kubeconfigs", http.StatusInternalServerError)
 		return
 	}
+	stopDeselectedKubernetesClients(previousSelection, selection)
 
 	message := "kubeconfig saved. k8s probe started."
 	probeRunning := false
@@ -243,6 +348,9 @@ func handleMoldKubernetesDisable(w http.ResponseWriter, r *http.Request, stopPro
 	if err := removeMoldKubernetesManagedKubeconfigs(previousSelection); err != nil {
 		http.Error(w, "failed to remove kubeconfig", http.StatusInternalServerError)
 		return
+	}
+	for _, clusterID := range normalizedSelectionClusterIDs(previousSelection) {
+		stopKubernetesClient(clusterID)
 	}
 	if stopProbe != nil {
 		stopProbe()
@@ -348,6 +456,405 @@ func handleMoldKubernetesTest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, moldKubernetesTestResponse{OK: ok, Message: message, Checks: checks})
 }
 
+func handleMoldKubernetesClusterSummary(w http.ResponseWriter, r *http.Request, isProbeRunning moldKubernetesProbeStatus) {
+	clusterID := strings.TrimSpace(r.URL.Query().Get("id"))
+	if clusterID == "" {
+		http.Error(w, "cluster id is required", http.StatusBadRequest)
+		return
+	}
+
+	clusters, err := listMoldKubernetesClusters()
+	if err != nil {
+		writeMoldKubernetesError(w, err)
+		return
+	}
+	var selected *moldKubernetesCluster
+	for i := range clusters {
+		if clusters[i].ID == clusterID {
+			selected = &clusters[i]
+			break
+		}
+	}
+	if selected == nil {
+		http.Error(w, "cluster not found", http.StatusNotFound)
+		return
+	}
+	selection, _ := readMoldKubernetesSelection()
+	selected.CollectionEnabled = selection.Enabled && containsString(normalizedSelectionClusterIDs(selection), selected.ID)
+	selected.CollectionRunning = selected.CollectionEnabled && isProbeRunning != nil && isProbeRunning()
+
+	summary, err := collectKubernetesClusterSummary(*selected)
+	if err != nil {
+		writeMoldKubernetesError(w, err)
+		return
+	}
+	writeJSON(w, summary)
+}
+
+func collectKubernetesClusterSummary(cluster moldKubernetesCluster) (moldKubernetesClusterSummary, error) {
+	clientset, _, err := getMoldKubernetesClient(cluster)
+	if err != nil {
+		return moldKubernetesClusterSummary{}, err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return moldKubernetesClusterSummary{}, newVMConsoleAPIError(http.StatusBadGateway, "Kubernetes node 목록을 조회하지 못했습니다.", err)
+	}
+	pods, err := clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return moldKubernetesClusterSummary{}, newVMConsoleAPIError(http.StatusBadGateway, "Kubernetes pod 목록을 조회하지 못했습니다.", err)
+	}
+	namespaces, err := clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return moldKubernetesClusterSummary{}, newVMConsoleAPIError(http.StatusBadGateway, "Kubernetes namespace 목록을 조회하지 못했습니다.", err)
+	}
+	services, err := clientset.CoreV1().Services("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return moldKubernetesClusterSummary{}, newVMConsoleAPIError(http.StatusBadGateway, "Kubernetes service 목록을 조회하지 못했습니다.", err)
+	}
+	endpointSlices, endpointSliceErr := clientset.DiscoveryV1().EndpointSlices("").List(ctx, metav1.ListOptions{})
+
+	summary := moldKubernetesClusterSummary{
+		Cluster:        cluster,
+		ClusterID:      cluster.ID,
+		APIServer:      cluster.APIServer,
+		Namespaces:     len(namespaces.Items),
+		NamespaceCount: len(namespaces.Items),
+		Services:       len(services.Items),
+		ServiceCount:   len(services.Items),
+		Risks:          make([]kubernetesRiskItem, 0),
+		RecentChanges:  make([]kubernetesRecentChange, 0),
+		CollectedAt:    time.Now().UTC(),
+	}
+	for i := range namespaces.Items {
+		if namespaces.Items[i].Name == metav1.NamespaceSystem {
+			summary.ClusterUID = string(namespaces.Items[i].UID)
+			break
+		}
+	}
+	if version, versionErr := clientset.Discovery().ServerVersion(); versionErr == nil {
+		summary.Version = version.GitVersion
+	}
+	if summary.Version == "" {
+		summary.Version = cluster.Version
+	}
+	summary.KubernetesVersion = summary.Version
+
+	notReadyNodeNames := make(map[string]bool)
+	pressureCount := 0
+	for i := range nodes.Items {
+		node := &nodes.Items[i]
+		ready := kubernetesNodeReady(node)
+		controlPlane := isKubernetesControlPlaneNode(node)
+		summary.Nodes.Total++
+		if ready {
+			summary.Nodes.Ready++
+		} else {
+			summary.Nodes.NotReady++
+			notReadyNodeNames[node.Name] = true
+		}
+		if controlPlane {
+			summary.ControlPlane.Total++
+			if ready {
+				summary.ControlPlane.Ready++
+			} else {
+				summary.ControlPlane.NotReady++
+			}
+		}
+
+		addResourceList(&summary.Resources, node.Status.Capacity, true)
+		addResourceList(&summary.Resources, node.Status.Allocatable, false)
+		for _, condition := range node.Status.Conditions {
+			if !condition.LastTransitionTime.IsZero() {
+				summary.RecentChanges = append(summary.RecentChanges, kubernetesRecentChange{
+					Time: condition.LastTransitionTime.Time, Resource: node.Name,
+					Message:  fmt.Sprintf("%s: %s", condition.Type, condition.Status),
+					Severity: nodeConditionSeverity(condition),
+				})
+			}
+			if condition.Status == corev1.ConditionTrue && (condition.Type == corev1.NodeMemoryPressure || condition.Type == corev1.NodeDiskPressure || condition.Type == corev1.NodePIDPressure || condition.Type == corev1.NodeNetworkUnavailable) {
+				pressureCount++
+			}
+		}
+	}
+
+	impactedPods := make(map[string]bool)
+	impactedPodUIDs := make(map[string]bool)
+	localStorageWorkloads := make(map[string]bool)
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		summary.Pods.Total++
+		switch pod.Status.Phase {
+		case corev1.PodRunning:
+			summary.Pods.Running++
+		case corev1.PodPending:
+			summary.Pods.Pending++
+		case corev1.PodFailed:
+			summary.Pods.Failed++
+		default:
+			summary.Pods.Unknown++
+		}
+		if notReadyNodeNames[pod.Spec.NodeName] || pod.Status.Phase == corev1.PodFailed {
+			impactedPods[pod.Namespace+"/"+pod.Name] = true
+			impactedPodUIDs[string(pod.UID)] = true
+		}
+		for _, volume := range pod.Spec.Volumes {
+			if volume.HostPath != nil {
+				workloadID := string(pod.UID)
+				if len(pod.OwnerReferences) > 0 {
+					workloadID = string(pod.OwnerReferences[0].UID)
+				}
+				localStorageWorkloads[workloadID] = true
+				break
+			}
+		}
+		addPodResources(&summary.Resources, pod)
+		for _, condition := range pod.Status.Conditions {
+			if condition.LastTransitionTime.IsZero() {
+				continue
+			}
+			severity := "info"
+			if condition.Status == corev1.ConditionFalse && (condition.Type == corev1.PodReady || condition.Type == corev1.ContainersReady) {
+				severity = "warning"
+			}
+			summary.RecentChanges = append(summary.RecentChanges, kubernetesRecentChange{
+				Time: condition.LastTransitionTime.Time, Resource: pod.Namespace + "/" + pod.Name,
+				Message: fmt.Sprintf("%s: %s", condition.Type, condition.Status), Severity: severity,
+			})
+		}
+	}
+
+	impactedServices := make(map[string]bool)
+	externalPaths := make(map[string]bool)
+	endpointPodUIDs := make(map[string][]string)
+	endpointNodes := make(map[string]map[string]bool)
+	servicesWithSlices := make(map[string]bool)
+	if endpointSliceErr == nil {
+		for i := range endpointSlices.Items {
+			slice := &endpointSlices.Items[i]
+			serviceName := slice.Labels[discoveryv1.LabelServiceName]
+			if serviceName == "" {
+				continue
+			}
+			serviceKey := slice.Namespace + "/" + serviceName
+			servicesWithSlices[serviceKey] = true
+			if endpointNodes[serviceKey] == nil {
+				endpointNodes[serviceKey] = make(map[string]bool)
+			}
+			for _, endpoint := range slice.Endpoints {
+				if endpoint.TargetRef != nil && endpoint.TargetRef.Kind == "Pod" {
+					endpointPodUIDs[serviceKey] = append(endpointPodUIDs[serviceKey], string(endpoint.TargetRef.UID))
+				}
+				if (endpoint.Conditions.Ready == nil || *endpoint.Conditions.Ready) && endpoint.NodeName != nil {
+					endpointNodes[serviceKey][*endpoint.NodeName] = true
+				}
+			}
+		}
+	}
+	for i := range services.Items {
+		service := &services.Items[i]
+		serviceKey := service.Namespace + "/" + service.Name
+		if service.Spec.Type == corev1.ServiceTypeNodePort || service.Spec.Type == corev1.ServiceTypeLoadBalancer || service.Spec.Type == corev1.ServiceTypeExternalName || len(service.Spec.ExternalIPs) > 0 {
+			externalPaths[fmt.Sprintf("Service %s/%s (%s)", service.Namespace, service.Name, service.Spec.Type)] = true
+		}
+		if servicesWithSlices[serviceKey] {
+			for _, podUID := range endpointPodUIDs[serviceKey] {
+				if impactedPodUIDs[podUID] {
+					impactedServices[serviceKey] = true
+					break
+				}
+			}
+			if len(endpointPodUIDs[serviceKey]) > 0 && len(endpointNodes[serviceKey]) == 1 {
+				summary.SingleNodeEndpointServiceCount++
+			}
+			continue
+		}
+		if len(service.Spec.Selector) == 0 {
+			continue
+		}
+		for p := range pods.Items {
+			pod := &pods.Items[p]
+			if pod.Namespace != service.Namespace || !labelsMatch(service.Spec.Selector, pod.Labels) {
+				continue
+			}
+			if impactedPods[pod.Namespace+"/"+pod.Name] {
+				impactedServices[serviceKey] = true
+				break
+			}
+		}
+	}
+	if ingresses, ingressErr := clientset.NetworkingV1().Ingresses("").List(ctx, metav1.ListOptions{}); ingressErr == nil {
+		for i := range ingresses.Items {
+			ingress := &ingresses.Items[i]
+			externalPaths[fmt.Sprintf("Ingress %s/%s", ingress.Namespace, ingress.Name)] = true
+		}
+	}
+	if deployments, deploymentErr := clientset.AppsV1().Deployments("").List(ctx, metav1.ListOptions{}); deploymentErr == nil {
+		for i := range deployments.Items {
+			if deployments.Items[i].Spec.Replicas != nil && *deployments.Items[i].Spec.Replicas == 1 {
+				summary.SingleReplicaWorkloadCount++
+			}
+		}
+	}
+	if statefulSets, statefulSetErr := clientset.AppsV1().StatefulSets("").List(ctx, metav1.ListOptions{}); statefulSetErr == nil {
+		for i := range statefulSets.Items {
+			if statefulSets.Items[i].Spec.Replicas != nil && *statefulSets.Items[i].Spec.Replicas == 1 {
+				summary.SingleReplicaWorkloadCount++
+			}
+		}
+	}
+
+	collectKubernetesNodeMetrics(ctx, clientset, &summary.Resources)
+	summary.AffectedServices = len(impactedServices)
+	summary.CurrentlyImpactedServiceCount = summary.AffectedServices
+	summary.LocalStorageDependentWorkloadCount = len(localStorageWorkloads)
+	for detail := range externalPaths {
+		summary.ExternalPathDetails = append(summary.ExternalPathDetails, detail)
+	}
+	sort.Strings(summary.ExternalPathDetails)
+	summary.ExternalPathCount = len(summary.ExternalPathDetails)
+	if summary.Nodes.NotReady > 0 {
+		summary.Risks = append(summary.Risks, kubernetesRiskItem{Severity: "critical", Title: "NotReady 노드", Message: "Ready 상태가 아닌 노드가 있습니다.", Count: summary.Nodes.NotReady})
+	}
+	if summary.ControlPlane.NotReady > 0 {
+		summary.Risks = append(summary.Risks, kubernetesRiskItem{Severity: "critical", Title: "Control Plane 이상", Message: "Ready 상태가 아닌 Control Plane 노드가 있습니다.", Count: summary.ControlPlane.NotReady})
+	}
+	if summary.Pods.Failed > 0 {
+		summary.Risks = append(summary.Risks, kubernetesRiskItem{Severity: "critical", Title: "Failed Pod", Message: "실패 상태의 Pod가 있습니다.", Count: summary.Pods.Failed})
+	}
+	if summary.Pods.Pending > 0 {
+		summary.Risks = append(summary.Risks, kubernetesRiskItem{Severity: "warning", Title: "Pending Pod", Message: "스케줄링 또는 시작을 기다리는 Pod가 있습니다.", Count: summary.Pods.Pending})
+	}
+	if pressureCount > 0 {
+		summary.Risks = append(summary.Risks, kubernetesRiskItem{Severity: "warning", Title: "노드 압박 상태", Message: "메모리·디스크·PID 또는 네트워크 압박 조건이 감지되었습니다.", Count: pressureCount})
+	}
+	if summary.AffectedServices > 0 {
+		summary.Risks = append(summary.Risks, kubernetesRiskItem{Severity: "critical", Title: "서비스 영향", Message: "장애 노드 또는 Failed Pod가 서비스 엔드포인트에 영향을 줍니다.", Count: summary.AffectedServices})
+	}
+	if !summary.Resources.MetricsAvailable {
+		summary.Risks = append(summary.Risks, kubernetesRiskItem{Severity: "info", Title: "사용률 데이터 미수집", Message: "metrics-server에서 CPU·메모리 사용률을 가져오지 못했습니다."})
+	}
+	summary.ImpactScore = minInt(100, summary.Nodes.NotReady*25+summary.ControlPlane.NotReady*35+summary.Pods.Failed*8+summary.Pods.Pending*2+summary.AffectedServices*10)
+	summary.CurrentImpactScore = summary.ImpactScore
+	summary.SingleControlPlane = summary.ControlPlane.Total == 1
+	summary.InfrastructureRiskScore = minInt(100,
+		boolScore(summary.SingleControlPlane, 15)+
+			boolScore(summary.SingleReplicaWorkloadCount > 0, 15)+
+			boolScore(summary.SingleNodeEndpointServiceCount > 0, 15)+
+			boolScore(summary.LocalStorageDependentWorkloadCount > 0, 15)+
+			boolScore(summary.ExternalPathCount == 1, 10))
+	summary.ControlPlaneReady = summary.ControlPlane.Ready
+	summary.ControlPlaneTotal = summary.ControlPlane.Total
+	summary.NodeReady = summary.Nodes.Ready
+	summary.NodeTotal = summary.Nodes.Total
+	summary.PodRunning = summary.Pods.Running
+	summary.PodPending = summary.Pods.Pending
+	summary.PodFailed = summary.Pods.Failed
+	setKubernetesCollectionState(cluster.ID, kubernetesHealthy, nil)
+	collectionState := getKubernetesCollectionState(cluster.ID)
+	summary.APIConnectionStatus = collectionState.Status
+	summary.LastSyncAt = collectionState.LastSyncAt
+	sort.Slice(summary.RecentChanges, func(i, j int) bool { return summary.RecentChanges[i].Time.After(summary.RecentChanges[j].Time) })
+	if len(summary.RecentChanges) > 8 {
+		summary.RecentChanges = summary.RecentChanges[:8]
+	}
+	return summary, nil
+}
+
+func kubernetesNodeReady(node *corev1.Node) bool {
+	for _, condition := range node.Status.Conditions {
+		if condition.Type == corev1.NodeReady {
+			return condition.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
+func isKubernetesControlPlaneNode(node *corev1.Node) bool {
+	_, controlPlane := node.Labels["node-role.kubernetes.io/control-plane"]
+	_, master := node.Labels["node-role.kubernetes.io/master"]
+	return controlPlane || master
+}
+
+func nodeConditionSeverity(condition corev1.NodeCondition) string {
+	if condition.Type == corev1.NodeReady && condition.Status != corev1.ConditionTrue {
+		return "critical"
+	}
+	if condition.Status == corev1.ConditionTrue && condition.Type != corev1.NodeReady {
+		return "warning"
+	}
+	return "info"
+}
+
+func addResourceList(summary *kubernetesResourceSummary, resources corev1.ResourceList, capacity bool) {
+	cpu := resources.Cpu()
+	memory := resources.Memory()
+	if capacity {
+		summary.CapacityCPUCores += float64(cpu.MilliValue()) / 1000
+		summary.CapacityMemoryBytes += memory.Value()
+	} else {
+		summary.AllocatableCPUCores += float64(cpu.MilliValue()) / 1000
+		summary.AllocatableMemoryBytes += memory.Value()
+	}
+}
+
+func addPodResources(summary *kubernetesResourceSummary, pod *corev1.Pod) {
+	for _, container := range pod.Spec.Containers {
+		summary.RequestsCPUCores += float64(container.Resources.Requests.Cpu().MilliValue()) / 1000
+		summary.RequestsMemoryBytes += container.Resources.Requests.Memory().Value()
+		summary.LimitsCPUCores += float64(container.Resources.Limits.Cpu().MilliValue()) / 1000
+		summary.LimitsMemoryBytes += container.Resources.Limits.Memory().Value()
+	}
+}
+
+func collectKubernetesNodeMetrics(ctx context.Context, clientset kubernetes.Interface, summary *kubernetesResourceSummary) {
+	raw, err := clientset.CoreV1().RESTClient().Get().AbsPath("/apis/metrics.k8s.io/v1beta1/nodes").DoRaw(ctx)
+	if err != nil {
+		return
+	}
+	var metrics kubernetesNodeMetricsList
+	if err := json.Unmarshal(raw, &metrics); err != nil || len(metrics.Items) == 0 {
+		return
+	}
+	for _, item := range metrics.Items {
+		summary.UsageCPUCores += float64(item.Usage.Cpu().MilliValue()) / 1000
+		summary.UsageMemoryBytes += item.Usage.Memory().Value()
+	}
+	summary.MetricsAvailable = true
+	if summary.AllocatableCPUCores > 0 {
+		summary.CPUUsagePercent = summary.UsageCPUCores / summary.AllocatableCPUCores * 100
+	}
+	if summary.AllocatableMemoryBytes > 0 {
+		summary.MemoryUsagePercent = float64(summary.UsageMemoryBytes) / float64(summary.AllocatableMemoryBytes) * 100
+	}
+}
+
+func labelsMatch(selector, labels map[string]string) bool {
+	for key, value := range selector {
+		if labels[key] != value {
+			return false
+		}
+	}
+	return true
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func boolScore(condition bool, score int) int {
+	if condition {
+		return score
+	}
+	return 0
+}
+
 func listMoldKubernetesClusters() ([]moldKubernetesCluster, error) {
 	body, _, err := requestMoldAPI(moldKubernetesListCommand, []apiParam{
 		{Key: "command", Value: moldKubernetesListCommand},
@@ -430,10 +937,24 @@ func parseMoldKubernetesClusters(body []byte) ([]moldKubernetesCluster, error) {
 			continue
 		}
 		clusters = append(clusters, moldKubernetesCluster{
-			ID:        valueAsString(m["id"]),
-			Name:      valueAsString(m["name"]),
-			State:     valueAsString(m["state"]),
-			APIServer: firstNonEmpty(valueAsString(m["endpoint"]), valueAsString(m["apiserver"]), valueAsString(m["apiServer"])),
+			ID:              valueAsString(m["id"]),
+			Name:            valueAsString(m["name"]),
+			State:           valueAsString(m["state"]),
+			APIServer:       firstNonEmpty(valueAsString(m["endpoint"]), valueAsString(m["apiserver"]), valueAsString(m["apiServer"])),
+			Description:     valueAsString(m["description"]),
+			ZoneName:        firstNonEmpty(valueAsString(m["zonename"]), valueAsString(m["zoneName"])),
+			Version:         firstNonEmpty(valueAsString(m["kubernetesversionname"]), valueAsString(m["kubernetesVersionName"])),
+			ControlNodes:    valueAsInt64(firstNonNil(m["controlnodes"], m["controlNodes"], m["masternodes"])),
+			WorkerNodes:     valueAsInt64(firstNonNil(m["size"], m["workernodes"], m["workerNodes"])),
+			Cores:           valueAsInt64(firstNonNil(m["cpunumber"], m["cores"])),
+			MemoryMB:        valueAsInt64(m["memory"]),
+			NetworkName:     firstNonEmpty(valueAsString(m["associatednetworkname"]), valueAsString(m["associatedNetworkName"])),
+			ServiceOffering: firstNonEmpty(valueAsString(m["serviceofferingname"]), valueAsString(m["serviceOfferingName"])),
+			IPAddress:       firstNonEmpty(valueAsString(m["ipaddress"]), valueAsString(m["ipAddress"])),
+			Autoscaling:     valueAsBool(firstNonNil(m["autoscalingenabled"], m["autoscalingEnabled"])),
+			MinSize:         valueAsInt64(firstNonNil(m["minsize"], m["minSize"])),
+			MaxSize:         valueAsInt64(firstNonNil(m["maxsize"], m["maxSize"])),
+			Created:         valueAsString(m["created"]),
 		})
 	}
 	return clusters, nil
@@ -505,6 +1026,32 @@ func valueAsString(v interface{}) string {
 		}
 		return fmt.Sprintf("%v", t)
 	}
+}
+
+func valueAsInt64(v interface{}) int64 {
+	value, _ := strconv.ParseInt(strings.TrimSpace(valueAsString(v)), 10, 64)
+	return value
+}
+
+func valueAsBool(v interface{}) bool {
+	switch value := v.(type) {
+	case bool:
+		return value
+	case json.Number:
+		return value.String() != "0"
+	default:
+		parsed, _ := strconv.ParseBool(strings.TrimSpace(valueAsString(v)))
+		return parsed
+	}
+}
+
+func firstNonNil(values ...interface{}) interface{} {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
 }
 
 func firstNonEmpty(values ...string) string {
@@ -745,4 +1292,11 @@ func RegisterMoldKubernetesAPI(httpServer *shttp.Server, startProbe moldKubernet
 		handleMoldKubernetesDisable(w, r, stopProbe)
 	}).Methods("POST")
 	httpServer.Router.HandleFunc("/api/mold/kubernetes-clusters/test", handleMoldKubernetesTest).Methods("POST")
+	httpServer.Router.HandleFunc("/api/mold/kubernetes-clusters/summary", func(w http.ResponseWriter, r *http.Request) {
+		handleMoldKubernetesClusterSummary(w, r, isProbeRunning)
+	}).Methods("GET")
+	httpServer.Router.HandleFunc("/api/mold/kubernetes-clusters/nodes/detail", handleMoldKubernetesNodeDetail).Methods("GET")
+	httpServer.Router.HandleFunc("/api/mold/kubernetes-clusters/namespaces/detail", handleMoldKubernetesNamespaceDetail).Methods("GET")
+	httpServer.Router.HandleFunc("/api/mold/kubernetes-clusters/pods/detail", handleMoldKubernetesPodDetail).Methods("GET")
+	httpServer.Router.HandleFunc("/api/mold/kubernetes-clusters/services/detail", handleMoldKubernetesServiceDetail).Methods("GET")
 }

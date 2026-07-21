@@ -422,6 +422,7 @@ func NewServerFromConfig() (*Server, error) {
 	api.RegisterMoldVMConsoleAPI(httpServer)
 	api.RegisterMoldKubernetesAPI(httpServer, startMoldKubernetesProbe(g, probeBundle), stopMoldKubernetesProbe(probeBundle), isMoldKubernetesProbeRunning(probeBundle))
 	api.RegisterMoldHostDetailAPI(httpServer)
+	api.RegisterMoldManagementServerAPI(httpServer)
 	api.RegisterWallHostTrendAPI(hub.HTTPServer())
 
 	if err := s.loadStaticWorkflows(); err != nil {
