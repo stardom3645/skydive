@@ -41,6 +41,13 @@ func (h *storageClassHandler) Map(obj interface{}) (graph.Identifier, graph.Meta
 
 	m := NewMetadataFields(&sc.ObjectMeta)
 	m.SetField("Provisioner", sc.Provisioner)
+	m.SetFieldAndNormalize("ReclaimPolicy", sc.ReclaimPolicy)
+	m.SetFieldAndNormalize("VolumeBindingMode", sc.VolumeBindingMode)
+	m.SetFieldAndNormalize("AllowVolumeExpansion", sc.AllowVolumeExpansion)
+	m.SetFieldAndNormalize("Parameters", sc.Parameters)
+	defaultClass := sc.Annotations["storageclass.kubernetes.io/is-default-class"] == "true" ||
+		sc.Annotations["storageclass.beta.kubernetes.io/is-default-class"] == "true"
+	m.SetField("Default", defaultClass)
 
 	return graph.Identifier(sc.GetUID()), NewMetadata(Manager, "storageclass", m, sc, sc.Name)
 }

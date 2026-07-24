@@ -44,6 +44,7 @@ func (h *persistentVolumeClaimHandler) Map(obj interface{}) (graph.Identifier, g
 	m.SetFieldAndNormalize("StorageClassName", pvc.Spec.StorageClassName)
 	m.SetFieldAndNormalize("VolumeMode", pvc.Spec.VolumeMode)
 	m.SetFieldAndNormalize("Status", pvc.Status.Phase)
+	m.SetFieldAndNormalize("RequestedCapacity", pvc.Spec.Resources.Requests.Storage())
 
 	metadata := NewMetadata(Manager, "persistentvolumeclaim", m, pvc, pvc.Name)
 	SetState(&metadata, pvc.Status.Phase == "Bound")

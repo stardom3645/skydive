@@ -228,6 +228,21 @@ func NewK8sProbe(g *graph.Graph) (probe.Handler, error) {
 
 func newSingleK8sProbe(g *graph.Graph, kubeconfigPath, runtimeManager, clusterNameOverride string, cleanupOnStop bool) (*K8sProbe, error) {
 	enabledSubprobes := config.GetStringSlice("analyzer.topology.k8s.probes")
+	// Storage is part of the Netdive Kubernetes product topology. Older product
+	// configurations predate these resources and keep an explicit allow-list,
+	// so append only the missing storage probes while preserving every operator
+	// choice already present in the list.
+	if len(enabledSubprobes) > 0 {
+		seen := make(map[string]bool, len(enabledSubprobes))
+		for _, name := range enabledSubprobes {
+			seen[name] = true
+		}
+		for _, name := range []string{"persistentvolume", "persistentvolumeclaim", "storageclass"} {
+			if !seen[name] {
+				enabledSubprobes = append(enabledSubprobes, name)
+			}
+		}
+	}
 
 	clientconfig, kubeconfig, err := NewConfig(kubeconfigPath)
 	if err != nil {
@@ -285,6 +300,7 @@ func newSingleK8sProbe(g *graph.Graph, kubeconfigPath, runtimeManager, clusterNa
 		newPVPVCLinker(runtimeManager),
 		newStorageClassPVCLinker(runtimeManager),
 		newStorageClassPVLinker(runtimeManager),
+		newPVNodeLinker(runtimeManager),
 	}
 
 	linkers := InitLinkers(linkerHandlers, g)
