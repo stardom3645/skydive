@@ -19,6 +19,7 @@ package k8s
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/skydive-project/skydive/graffiti/graph"
 	"github.com/skydive-project/skydive/probe"
@@ -44,7 +45,15 @@ func (h *persistentVolumeClaimHandler) Map(obj interface{}) (graph.Identifier, g
 	m.SetFieldAndNormalize("StorageClassName", pvc.Spec.StorageClassName)
 	m.SetFieldAndNormalize("VolumeMode", pvc.Spec.VolumeMode)
 	m.SetFieldAndNormalize("Status", pvc.Status.Phase)
-	m.SetFieldAndNormalize("RequestedCapacity", pvc.Spec.Resources.Requests.Storage())
+	if !pvc.CreationTimestamp.IsZero() {
+		m.SetField("CreationTimestamp", pvc.CreationTimestamp.Time.UTC().Format(time.RFC3339Nano))
+	}
+	if requested, found := pvc.Spec.Resources.Requests[v1.ResourceStorage]; found {
+		m.SetField("RequestedCapacity", requested.String())
+	}
+	if capacity, found := pvc.Status.Capacity[v1.ResourceStorage]; found {
+		m.SetField("StatusCapacity", capacity.String())
+	}
 
 	metadata := NewMetadata(Manager, "persistentvolumeclaim", m, pvc, pvc.Name)
 	SetState(&metadata, pvc.Status.Phase == "Bound")

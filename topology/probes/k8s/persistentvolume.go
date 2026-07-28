@@ -19,6 +19,7 @@ package k8s
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/skydive-project/skydive/graffiti/graph"
 	"github.com/skydive-project/skydive/probe"
@@ -39,7 +40,12 @@ func (h *persistentVolumeHandler) Map(obj interface{}) (graph.Identifier, graph.
 	pv := obj.(*v1.PersistentVolume)
 
 	m := NewMetadataFields(&pv.ObjectMeta)
-	m.SetFieldAndNormalize("Capacity", pv.Spec.Capacity)
+	if capacity, found := pv.Spec.Capacity[v1.ResourceStorage]; found {
+		m.SetField("Capacity", map[string]string{"storage": capacity.String()})
+	}
+	if !pv.CreationTimestamp.IsZero() {
+		m.SetField("CreationTimestamp", pv.CreationTimestamp.Time.UTC().Format(time.RFC3339Nano))
+	}
 	m.SetFieldAndNormalize("VolumeMode", pv.Spec.VolumeMode)
 	m.SetFieldAndNormalize("StorageClassName", pv.Spec.StorageClassName)
 	m.SetFieldAndNormalize("Status", pv.Status.Phase)

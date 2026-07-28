@@ -19,6 +19,7 @@ package k8s
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/skydive-project/skydive/graffiti/graph"
 	"github.com/skydive-project/skydive/probe"
@@ -45,6 +46,9 @@ func (h *storageClassHandler) Map(obj interface{}) (graph.Identifier, graph.Meta
 	m.SetFieldAndNormalize("VolumeBindingMode", sc.VolumeBindingMode)
 	m.SetFieldAndNormalize("AllowVolumeExpansion", sc.AllowVolumeExpansion)
 	m.SetFieldAndNormalize("Parameters", sc.Parameters)
+	if !sc.CreationTimestamp.IsZero() {
+		m.SetField("CreationTimestamp", sc.CreationTimestamp.Time.UTC().Format(time.RFC3339Nano))
+	}
 	defaultClass := sc.Annotations["storageclass.kubernetes.io/is-default-class"] == "true" ||
 		sc.Annotations["storageclass.beta.kubernetes.io/is-default-class"] == "true"
 	m.SetField("Default", defaultClass)
