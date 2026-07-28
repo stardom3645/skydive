@@ -45,14 +45,28 @@ func (h *persistentVolumeClaimHandler) Map(obj interface{}) (graph.Identifier, g
 	m.SetFieldAndNormalize("StorageClassName", pvc.Spec.StorageClassName)
 	m.SetFieldAndNormalize("VolumeMode", pvc.Spec.VolumeMode)
 	m.SetFieldAndNormalize("Status", pvc.Status.Phase)
+	m.SetFieldAndNormalize("accessModes", pvc.Spec.AccessModes)
+	if pvc.Spec.VolumeName != "" {
+		m.SetField("volumeName", pvc.Spec.VolumeName)
+	}
+	if pvc.Spec.VolumeMode != nil {
+		m.SetField("volumeMode", string(*pvc.Spec.VolumeMode))
+	}
+	if pvc.Spec.StorageClassName != nil {
+		m.SetField("storageClassName", *pvc.Spec.StorageClassName)
+	}
 	if !pvc.CreationTimestamp.IsZero() {
 		m.SetField("CreationTimestamp", pvc.CreationTimestamp.Time.UTC().Format(time.RFC3339Nano))
 	}
 	if requested, found := pvc.Spec.Resources.Requests[v1.ResourceStorage]; found {
-		m.SetField("RequestedCapacity", requested.String())
+		value := requested.String()
+		m.SetField("RequestedCapacity", value)
+		m.SetField("requestStorage", value)
 	}
 	if capacity, found := pvc.Status.Capacity[v1.ResourceStorage]; found {
-		m.SetField("StatusCapacity", capacity.String())
+		value := capacity.String()
+		m.SetField("StatusCapacity", value)
+		m.SetField("actualCapacity", value)
 	}
 
 	metadata := NewMetadata(Manager, "persistentvolumeclaim", m, pvc, pvc.Name)
