@@ -19,6 +19,7 @@ package k8s
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/skydive-project/skydive/graffiti/graph"
 	"github.com/skydive-project/skydive/probe"
@@ -47,6 +48,18 @@ func (h *nodeHandler) Map(obj interface{}) (graph.Identifier, graph.Metadata) {
 	m.SetField("Arch", node.Status.NodeInfo.Architecture)
 	m.SetField("Kernel", node.Status.NodeInfo.KernelVersion)
 	m.SetField("OS", node.Status.NodeInfo.OperatingSystem)
+	conditionStates := make(map[string]string, len(node.Status.Conditions))
+	conditionReasons := make(map[string]string, len(node.Status.Conditions))
+	conditionTransitionTimes := make(map[string]string, len(node.Status.Conditions))
+	for _, condition := range node.Status.Conditions {
+		key := string(condition.Type)
+		conditionStates[key] = string(condition.Status)
+		conditionReasons[key] = condition.Reason
+		conditionTransitionTimes[key] = condition.LastTransitionTime.Time.UTC().Format(time.RFC3339Nano)
+	}
+	m.SetFieldAndNormalize("ConditionStates", conditionStates)
+	m.SetFieldAndNormalize("ConditionReasons", conditionReasons)
+	m.SetFieldAndNormalize("ConditionTransitionTimes", conditionTransitionTimes)
 
 	return graph.Identifier(node.GetUID()), NewMetadata(Manager, "node", m, node, node.Name)
 }

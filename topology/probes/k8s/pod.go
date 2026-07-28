@@ -19,6 +19,7 @@ package k8s
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/mohae/deepcopy"
 	"github.com/skydive-project/skydive/graffiti/graph"
@@ -48,6 +49,25 @@ func (h *podHandler) Map(obj interface{}) (graph.Identifier, graph.Metadata) {
 
 	m := NewMetadataFields(&pod.ObjectMeta)
 	m.SetField("Node", pod.Spec.NodeName)
+	m.SetField("CreationTimestamp", pod.CreationTimestamp.Time.UTC().Format(time.RFC3339Nano))
+	if pod.Status.StartTime != nil {
+		m.SetField("StartTime", pod.Status.StartTime.Time.UTC().Format(time.RFC3339Nano))
+	}
+	if pod.DeletionTimestamp != nil {
+		m.SetField("DeletionTimestamp", pod.DeletionTimestamp.Time.UTC().Format(time.RFC3339Nano))
+	}
+	var finishedAt time.Time
+	containerStatuses := append(append(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses...), pod.Status.EphemeralContainerStatuses...)
+	for _, status := range containerStatuses {
+		for _, terminated := range []*v1.ContainerStateTerminated{status.State.Terminated, status.LastTerminationState.Terminated} {
+			if terminated != nil && terminated.FinishedAt.Time.After(finishedAt) {
+				finishedAt = terminated.FinishedAt.Time
+			}
+		}
+	}
+	if !finishedAt.IsZero() {
+		m.SetField("FinishedAt", finishedAt.UTC().Format(time.RFC3339Nano))
+	}
 	podIP := pod.Status.PodIP
 	if podIP != "" {
 		m.SetField("IP", podIP)
