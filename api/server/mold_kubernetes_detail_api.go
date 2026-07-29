@@ -239,6 +239,8 @@ type kubernetesNodeDetail struct {
 	RunningPodCount                    *int                        `json:"runningPodCount,omitempty"`
 	PendingPodCount                    *int                        `json:"pendingPodCount,omitempty"`
 	FailedPodCount                     *int                        `json:"failedPodCount,omitempty"`
+	TerminatedPodCount                 *int                        `json:"terminatedPodCount,omitempty"`
+	EvictedPodCount                    *int                        `json:"evictedPodCount,omitempty"`
 	RestartPodCount                    *int                        `json:"restartPodCount,omitempty"`
 	OOMKilledPodCount                  *int                        `json:"oomKilledPodCount,omitempty"`
 	ProblemPods                        []kubernetesObjectReference `json:"problemPods"`
@@ -472,30 +474,63 @@ func handleMoldKubernetesNodeDetail(w http.ResponseWriter, r *http.Request) {
 	if podErr == nil {
 		podAggregate := aggregateKubernetesPods(pods.Items)
 		podCount, running, pending, failed := len(podAggregate.ActivePods), podAggregate.Running, podAggregate.Pending, 0
-		impactedPods := make(map[string]bool)
 		for i := range podAggregate.ProblemPods {
 			pod := &podAggregate.ProblemPods[i]
-			if !kubernetesNodeReady(node) || classifyKubernetesPod(pod).Problem {
-				impactedPods[string(pod.UID)] = true
-			}
 			detail.ProblemPods = append(detail.ProblemPods, kubernetesObjectReference{UID: string(pod.UID), Kind: "Pod", Name: pod.Name, Namespace: pod.Namespace})
 		}
 		detail.PodCount, detail.RunningPodCount, detail.PendingPodCount, detail.FailedPodCount = &podCount, &running, &pending, &failed
+		terminated, evicted := len(podAggregate.TerminatedPods), len(podAggregate.EvictedPods)
+		detail.TerminatedPodCount, detail.EvictedPodCount = &terminated, &evicted
 		detail.RestartPodCount, detail.OOMKilledPodCount = &podAggregate.Restarted, &podAggregate.OOMKilled
-		impactedPodCount := len(impactedPods)
+		impactedPodCount := len(podAggregate.ProblemPods)
+		if !kubernetesNodeReady(node) {
+			impactedPodCount = len(podAggregate.ActivePods)
+		}
 		detail.ImpactedPodCount = &impactedPodCount
-		if slices, sliceErr := client.DiscoveryV1().EndpointSlices("").List(ctx, metav1.ListOptions{}); sliceErr == nil {
-			impactedServices := make(map[string]bool)
-			for _, slice := range slices.Items {
-				for _, endpoint := range slice.Endpoints {
-					if endpoint.TargetRef != nil && impactedPods[string(endpoint.TargetRef.UID)] {
-						impactedServices[slice.Namespace+"/"+slice.Labels[discoveryv1.LabelServiceName]] = true
-						break
+		if allPods, allPodsErr := client.CoreV1().Pods("").List(ctx, metav1.ListOptions{}); allPodsErr == nil {
+			if services, serviceErr := client.CoreV1().Services("").List(ctx, metav1.ListOptions{}); serviceErr == nil {
+				if slices, sliceErr := client.DiscoveryV1().EndpointSlices("").List(ctx, metav1.ListOptions{}); sliceErr == nil {
+					notReadyNodes := map[string]bool{}
+					if !kubernetesNodeReady(node) {
+						notReadyNodes[node.Name] = true
 					}
+					globalAggregate := aggregateKubernetesPods(allPods.Items)
+					impactByService := aggregateKubernetesServiceImpact(services.Items, slices.Items, globalAggregate, notReadyNodes)
+					nodePodUIDs := make(map[string]bool, len(podAggregate.ActivePods))
+					for i := range podAggregate.ActivePods {
+						nodePodUIDs[string(podAggregate.ActivePods[i].UID)] = true
+					}
+					impactedServices := make(map[string]bool)
+					for _, slice := range slices.Items {
+						key := slice.Namespace + "/" + slice.Labels[discoveryv1.LabelServiceName]
+						if !impactByService[key].Affected {
+							continue
+						}
+						for _, endpoint := range slice.Endpoints {
+							if endpoint.TargetRef != nil && nodePodUIDs[string(endpoint.TargetRef.UID)] {
+								impactedServices[key] = true
+								break
+							}
+						}
+					}
+					for i := range services.Items {
+						service := &services.Items[i]
+						key := service.Namespace + "/" + service.Name
+						if !impactByService[key].Affected || impactedServices[key] || len(service.Spec.Selector) == 0 {
+							continue
+						}
+						for p := range podAggregate.ActivePods {
+							pod := &podAggregate.ActivePods[p]
+							if pod.Namespace == service.Namespace && labelsMatch(service.Spec.Selector, pod.Labels) {
+								impactedServices[key] = true
+								break
+							}
+						}
+					}
+					count := len(impactedServices)
+					detail.ImpactedServiceCount = &count
 				}
 			}
-			count := len(impactedServices)
-			detail.ImpactedServiceCount = &count
 		}
 		populateKubernetesNodeWorkloadSummary(ctx, client, podAggregate.ActivePods, &detail)
 	}
@@ -776,6 +811,10 @@ func writeKubernetesDetailError(w http.ResponseWriter, clusterID string, err err
 // Pod -> ReplicaSet -> Deployment, Pod -> StatefulSet/DaemonSet,
 // and Pod -> Job -> CronJob. ReplicaSets never become visible workloads.
 func populateKubernetesNodeWorkloadSummary(ctx context.Context, client kubernetes.Interface, pods []corev1.Pod, detail *kubernetesNodeDetail) {
+	// Relationship and dependency counts are current-state metrics. Reapply the
+	// canonical active-Pod rule at this domain boundary so terminated history
+	// cannot enter the workload UID sets even if a future caller passes all Pods.
+	pods = aggregateKubernetesPods(pods).ActivePods
 	deployments, deploymentErr := client.AppsV1().Deployments("").List(ctx, metav1.ListOptions{})
 	replicaSets, replicaSetErr := client.AppsV1().ReplicaSets("").List(ctx, metav1.ListOptions{})
 	statefulSets, statefulSetErr := client.AppsV1().StatefulSets("").List(ctx, metav1.ListOptions{})

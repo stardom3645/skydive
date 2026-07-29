@@ -1,6 +1,31 @@
 package server
 
-import corev1 "k8s.io/api/core/v1"
+import (
+	"strings"
+
+	corev1 "k8s.io/api/core/v1"
+)
+
+var kubernetesActionablePodWaitingReasons = map[string]struct{}{
+	"CrashLoopBackOff":           {},
+	"ImagePullBackOff":           {},
+	"ErrImagePull":               {},
+	"CreateContainerConfigError": {},
+	"CreateContainerError":       {},
+	"RunContainerError":          {},
+	"ContainerStatusUnknown":     {},
+}
+
+// kubernetesPodScope keeps the domain aggregate independent from an API or UI.
+// Namespace and workload detail APIs can reuse it later without redefining Pod
+// phase/reason rules.
+type kubernetesPodScope struct {
+	NodeName       string
+	Namespace      string
+	OwnerUID       string
+	OwnerUIDForPod func(*corev1.Pod) string
+	Predicate      func(*corev1.Pod) bool
+}
 
 // kubernetesPodClassification is the single Analyzer domain rule used by
 // cluster, node and namespace APIs. Current resource counts include only
@@ -18,24 +43,30 @@ type kubernetesPodClassification struct {
 }
 
 type kubernetesPodAggregate struct {
-	ActivePods     []corev1.Pod
-	TerminatedPods []corev1.Pod
-	ProblemPods    []corev1.Pod
-	Running        int
-	Pending        int
-	Restarted      int
-	OOMKilled      int
+	AllPods              []corev1.Pod
+	ActivePods           []corev1.Pod
+	TerminatedPods       []corev1.Pod
+	EvictedPods          []corev1.Pod
+	ProblemPods          []corev1.Pod
+	RestartHistoryPods   []corev1.Pod
+	CurrentOOMKilledPods []corev1.Pod
+	Running              int
+	Pending              int
+	Restarted            int
+	OOMKilled            int
+	UnscheduledPending   int
 }
 
 func classifyKubernetesPod(pod *corev1.Pod) kubernetesPodClassification {
 	deleting := pod.DeletionTimestamp != nil
-	active := !deleting && (pod.Status.Phase == corev1.PodPending || pod.Status.Phase == corev1.PodRunning)
+	terminalReason := pod.Status.Reason == "Evicted" || pod.Status.Reason == "Completed"
+	active := !deleting && !terminalReason && (pod.Status.Phase == corev1.PodPending || pod.Status.Phase == corev1.PodRunning)
 	result := kubernetesPodClassification{
 		Active:     active,
 		Running:    active && pod.Status.Phase == corev1.PodRunning,
 		Pending:    active && pod.Status.Phase == corev1.PodPending,
-		Terminated: deleting || pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed,
-		Evicted:    pod.Status.Phase == corev1.PodFailed && pod.Status.Reason == "Evicted",
+		Terminated: deleting || terminalReason || pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed,
+		Evicted:    pod.Status.Reason == "Evicted",
 	}
 	if !active {
 		return result
@@ -53,8 +84,7 @@ func classifyKubernetesPod(pod *corev1.Pod) kubernetesPodClassification {
 			result.Restarted = true
 		}
 		if status.State.Waiting != nil {
-			switch status.State.Waiting.Reason {
-			case "CrashLoopBackOff", "ImagePullBackOff", "ErrImagePull", "CreateContainerConfigError", "CreateContainerError", "RunContainerError":
+			if _, actionable := kubernetesActionablePodWaitingReasons[status.State.Waiting.Reason]; actionable {
 				result.Problem = true
 			}
 			if status.State.Waiting.Reason == "CrashLoopBackOff" {
@@ -71,34 +101,73 @@ func classifyKubernetesPod(pod *corev1.Pod) kubernetesPodClassification {
 }
 
 func aggregateKubernetesPods(pods []corev1.Pod) kubernetesPodAggregate {
+	return aggregateKubernetesPodsInScope(pods, kubernetesPodScope{})
+}
+
+func aggregateKubernetesPodsInScope(pods []corev1.Pod, scope kubernetesPodScope) kubernetesPodAggregate {
 	result := kubernetesPodAggregate{
-		ActivePods:     make([]corev1.Pod, 0, len(pods)),
-		TerminatedPods: make([]corev1.Pod, 0),
-		ProblemPods:    make([]corev1.Pod, 0),
+		AllPods:              make([]corev1.Pod, 0, len(pods)),
+		ActivePods:           make([]corev1.Pod, 0, len(pods)),
+		TerminatedPods:       make([]corev1.Pod, 0),
+		EvictedPods:          make([]corev1.Pod, 0),
+		ProblemPods:          make([]corev1.Pod, 0),
+		RestartHistoryPods:   make([]corev1.Pod, 0),
+		CurrentOOMKilledPods: make([]corev1.Pod, 0),
 	}
+	seen := make(map[string]struct{}, len(pods))
 	for i := range pods {
-		classification := classifyKubernetesPod(&pods[i])
+		pod := &pods[i]
+		if scope.NodeName != "" && pod.Spec.NodeName != scope.NodeName {
+			continue
+		}
+		if scope.Namespace != "" && pod.Namespace != scope.Namespace {
+			continue
+		}
+		if scope.OwnerUID != "" && (scope.OwnerUIDForPod == nil || scope.OwnerUIDForPod(pod) != scope.OwnerUID) {
+			continue
+		}
+		if scope.Predicate != nil && !scope.Predicate(pod) {
+			continue
+		}
+		identity := string(pod.UID)
+		if identity == "" {
+			identity = strings.Join([]string{pod.Namespace, pod.Name}, "/")
+		}
+		if _, duplicate := seen[identity]; duplicate {
+			continue
+		}
+		seen[identity] = struct{}{}
+		result.AllPods = append(result.AllPods, *pod)
+		classification := classifyKubernetesPod(pod)
 		if classification.Terminated {
-			result.TerminatedPods = append(result.TerminatedPods, pods[i])
+			result.TerminatedPods = append(result.TerminatedPods, *pod)
+		}
+		if classification.Evicted {
+			result.EvictedPods = append(result.EvictedPods, *pod)
 		}
 		if !classification.Active {
 			continue
 		}
-		result.ActivePods = append(result.ActivePods, pods[i])
+		result.ActivePods = append(result.ActivePods, *pod)
 		if classification.Running {
 			result.Running++
 		}
 		if classification.Pending {
 			result.Pending++
+			if pod.Spec.NodeName == "" {
+				result.UnscheduledPending++
+			}
 		}
 		if classification.Problem {
-			result.ProblemPods = append(result.ProblemPods, pods[i])
+			result.ProblemPods = append(result.ProblemPods, *pod)
 		}
 		if classification.Restarted {
 			result.Restarted++
+			result.RestartHistoryPods = append(result.RestartHistoryPods, *pod)
 		}
 		if classification.OOMKilled {
 			result.OOMKilled++
+			result.CurrentOOMKilledPods = append(result.CurrentOOMKilledPods, *pod)
 		}
 	}
 	return result

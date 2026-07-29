@@ -61,6 +61,7 @@ type kubernetesStatusCount struct {
 	NotReady int `json:"notReady,omitempty"`
 	Running  int `json:"running,omitempty"`
 	Pending  int `json:"pending,omitempty"`
+	Problem  int `json:"problem,omitempty"`
 	Failed   int `json:"failed,omitempty"`
 	Unknown  int `json:"unknown,omitempty"`
 }
@@ -115,6 +116,7 @@ type moldKubernetesClusterSummary struct {
 	Pods                               kubernetesStatusCount         `json:"pods"`
 	PodRunning                         int                           `json:"podRunning"`
 	PodPending                         int                           `json:"podPending"`
+	PodProblem                         int                           `json:"podProblem"`
 	PodFailed                          int                           `json:"podFailed"`
 	Services                           int                           `json:"services"`
 	ServiceCount                       int                           `json:"serviceCount"`
@@ -581,22 +583,16 @@ func collectKubernetesClusterSummary(cluster moldKubernetesCluster) (moldKuberne
 		}
 	}
 
-	impactedPods := make(map[string]bool)
-	impactedPodUIDs := make(map[string]bool)
 	localStorageWorkloads := make(map[string]bool)
 	podAggregate := aggregateKubernetesPods(pods.Items)
 	summary.Pods.Total = len(podAggregate.ActivePods)
 	summary.Pods.Running = podAggregate.Running
 	summary.Pods.Pending = podAggregate.Pending
+	summary.Pods.Problem = len(podAggregate.ProblemPods)
 	summary.Pods.Failed = 0
 	summary.Pods.Unknown = 0
 	for i := range podAggregate.ActivePods {
 		pod := &podAggregate.ActivePods[i]
-		classification := classifyKubernetesPod(pod)
-		if notReadyNodeNames[pod.Spec.NodeName] || classification.Problem {
-			impactedPods[pod.Namespace+"/"+pod.Name] = true
-			impactedPodUIDs[string(pod.UID)] = true
-		}
 		for _, volume := range pod.Spec.Volumes {
 			if volume.HostPath != nil {
 				workloadID := string(pod.UID)
@@ -628,11 +624,8 @@ func collectKubernetesClusterSummary(cluster moldKubernetesCluster) (moldKuberne
 		}
 	}
 
-	impactedServices := make(map[string]bool)
 	externalPaths := make(map[string]bool)
-	endpointPodUIDs := make(map[string][]string)
 	endpointNodes := make(map[string]map[string]bool)
-	servicesWithSlices := make(map[string]bool)
 	if endpointSliceErr == nil {
 		for i := range endpointSlices.Items {
 			slice := &endpointSlices.Items[i]
@@ -641,14 +634,10 @@ func collectKubernetesClusterSummary(cluster moldKubernetesCluster) (moldKuberne
 				continue
 			}
 			serviceKey := slice.Namespace + "/" + serviceName
-			servicesWithSlices[serviceKey] = true
 			if endpointNodes[serviceKey] == nil {
 				endpointNodes[serviceKey] = make(map[string]bool)
 			}
 			for _, endpoint := range slice.Endpoints {
-				if endpoint.TargetRef != nil && endpoint.TargetRef.Kind == "Pod" {
-					endpointPodUIDs[serviceKey] = append(endpointPodUIDs[serviceKey], string(endpoint.TargetRef.UID))
-				}
 				if (endpoint.Conditions.Ready == nil || *endpoint.Conditions.Ready) && endpoint.NodeName != nil {
 					endpointNodes[serviceKey][*endpoint.NodeName] = true
 				}
@@ -661,30 +650,15 @@ func collectKubernetesClusterSummary(cluster moldKubernetesCluster) (moldKuberne
 		if service.Spec.Type == corev1.ServiceTypeNodePort || service.Spec.Type == corev1.ServiceTypeLoadBalancer || service.Spec.Type == corev1.ServiceTypeExternalName || len(service.Spec.ExternalIPs) > 0 {
 			externalPaths[fmt.Sprintf("Service %s/%s (%s)", service.Namespace, service.Name, service.Spec.Type)] = true
 		}
-		if servicesWithSlices[serviceKey] {
-			for _, podUID := range endpointPodUIDs[serviceKey] {
-				if impactedPodUIDs[podUID] {
-					impactedServices[serviceKey] = true
-					break
-				}
-			}
-			if len(endpointPodUIDs[serviceKey]) > 0 && len(endpointNodes[serviceKey]) == 1 {
-				summary.SingleNodeEndpointServiceCount++
-			}
-			continue
+		if len(endpointNodes[serviceKey]) == 1 {
+			summary.SingleNodeEndpointServiceCount++
 		}
-		if len(service.Spec.Selector) == 0 {
-			continue
-		}
-		for p := range pods.Items {
-			pod := &pods.Items[p]
-			if pod.Namespace != service.Namespace || !labelsMatch(service.Spec.Selector, pod.Labels) {
-				continue
-			}
-			if impactedPods[pod.Namespace+"/"+pod.Name] {
-				impactedServices[serviceKey] = true
-				break
-			}
+	}
+	serviceImpact := aggregateKubernetesServiceImpact(services.Items, endpointSlices.Items, podAggregate, notReadyNodeNames)
+	impactedServices := make(map[string]bool)
+	for key, impact := range serviceImpact {
+		if impact.Affected {
+			impactedServices[key] = true
 		}
 	}
 	if ingresses, ingressErr := clientset.NetworkingV1().Ingresses("").List(ctx, metav1.ListOptions{}); ingressErr == nil {
@@ -723,8 +697,8 @@ func collectKubernetesClusterSummary(cluster moldKubernetesCluster) (moldKuberne
 	if summary.ControlPlane.NotReady > 0 {
 		summary.Risks = append(summary.Risks, kubernetesRiskItem{Severity: "critical", Title: "Control Plane 이상", Message: "Ready 상태가 아닌 Control Plane 노드가 있습니다.", Count: summary.ControlPlane.NotReady})
 	}
-	if summary.Pods.Failed > 0 {
-		summary.Risks = append(summary.Risks, kubernetesRiskItem{Severity: "critical", Title: "Failed Pod", Message: "실패 상태의 Pod가 있습니다.", Count: summary.Pods.Failed})
+	if summary.Pods.Problem > 0 {
+		summary.Risks = append(summary.Risks, kubernetesRiskItem{Severity: "critical", Title: "현재 문제 Pod", Message: "현재 조치가 필요한 활성 Pod가 있습니다.", Count: summary.Pods.Problem})
 	}
 	if summary.Pods.Pending > 0 {
 		summary.Risks = append(summary.Risks, kubernetesRiskItem{Severity: "warning", Title: "Pending Pod", Message: "스케줄링 또는 시작을 기다리는 Pod가 있습니다.", Count: summary.Pods.Pending})
@@ -738,7 +712,7 @@ func collectKubernetesClusterSummary(cluster moldKubernetesCluster) (moldKuberne
 	if !summary.Resources.MetricsAvailable {
 		summary.Risks = append(summary.Risks, kubernetesRiskItem{Severity: "info", Title: "사용률 데이터 미수집", Message: "metrics-server에서 CPU·메모리 사용률을 가져오지 못했습니다."})
 	}
-	summary.ImpactScore = minInt(100, summary.Nodes.NotReady*25+summary.ControlPlane.NotReady*35+summary.Pods.Failed*8+summary.Pods.Pending*2+summary.AffectedServices*10)
+	summary.ImpactScore = minInt(100, summary.Nodes.NotReady*25+summary.ControlPlane.NotReady*35+summary.Pods.Problem*8+summary.Pods.Pending*2+summary.AffectedServices*10)
 	summary.CurrentImpactScore = summary.ImpactScore
 	summary.SingleControlPlane = summary.ControlPlane.Total == 1
 	summary.InfrastructureRiskScore = minInt(100,
@@ -753,6 +727,7 @@ func collectKubernetesClusterSummary(cluster moldKubernetesCluster) (moldKuberne
 	summary.NodeTotal = summary.Nodes.Total
 	summary.PodRunning = summary.Pods.Running
 	summary.PodPending = summary.Pods.Pending
+	summary.PodProblem = summary.Pods.Problem
 	summary.PodFailed = summary.Pods.Failed
 	setKubernetesCollectionState(cluster.ID, kubernetesHealthy, nil)
 	collectionState := getKubernetesCollectionState(cluster.ID)
