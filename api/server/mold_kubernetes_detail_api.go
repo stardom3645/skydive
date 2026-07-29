@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sort"
@@ -232,6 +233,7 @@ type kubernetesNodeDetail struct {
 	Labels                             map[string]string           `json:"labels,omitempty"`
 	Capacity                           corev1.ResourceList         `json:"capacity"`
 	Allocatable                        corev1.ResourceList         `json:"allocatable"`
+	Usage                              corev1.ResourceList         `json:"usage,omitempty"`
 	PodCount                           *int                        `json:"podCount,omitempty"`
 	MaxPodCount                        int64                       `json:"maxPodCount,omitempty"`
 	RunningPodCount                    *int                        `json:"runningPodCount,omitempty"`
@@ -449,6 +451,17 @@ func handleMoldKubernetesNodeDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	detail := kubernetesNodeDetail{ClusterID: cluster.ID, UID: string(node.UID), Name: node.Name, Roles: kubernetesNodeRoles(node.Labels), PodCIDRs: append([]string(nil), node.Spec.PodCIDRs...), KubernetesVersion: node.Status.NodeInfo.KubeletVersion, OSImage: node.Status.NodeInfo.OSImage, KernelVersion: node.Status.NodeInfo.KernelVersion, Architecture: node.Status.NodeInfo.Architecture, ContainerRuntime: node.Status.NodeInfo.ContainerRuntimeVersion, CreatedAt: node.CreationTimestamp.Time, Conditions: nodeConditions(node), Unschedulable: node.Spec.Unschedulable, Taints: append([]corev1.Taint(nil), node.Spec.Taints...), Labels: node.Labels, Capacity: node.Status.Capacity, Allocatable: node.Status.Allocatable, MaxPodCount: node.Status.Allocatable.Pods().Value(), ProblemPods: make([]kubernetesObjectReference, 0), RelationshipConfidence: "UNKNOWN"}
+	var nodeMetrics struct {
+		Usage corev1.ResourceList `json:"usage"`
+	}
+	if rawMetrics, metricsErr := client.Discovery().RESTClient().Get().
+		AbsPath("/apis/metrics.k8s.io/v1beta1/nodes", node.Name).
+		Do(ctx).
+		Raw(); metricsErr == nil {
+		if jsonErr := json.Unmarshal(rawMetrics, &nodeMetrics); jsonErr == nil {
+			detail.Usage = nodeMetrics.Usage
+		}
+	}
 	for _, address := range node.Status.Addresses {
 		if address.Type == corev1.NodeInternalIP {
 			detail.InternalIP = address.Address
