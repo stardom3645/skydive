@@ -584,20 +584,16 @@ func collectKubernetesClusterSummary(cluster moldKubernetesCluster) (moldKuberne
 	impactedPods := make(map[string]bool)
 	impactedPodUIDs := make(map[string]bool)
 	localStorageWorkloads := make(map[string]bool)
-	for i := range pods.Items {
-		pod := &pods.Items[i]
-		summary.Pods.Total++
-		switch pod.Status.Phase {
-		case corev1.PodRunning:
-			summary.Pods.Running++
-		case corev1.PodPending:
-			summary.Pods.Pending++
-		case corev1.PodFailed:
-			summary.Pods.Failed++
-		default:
-			summary.Pods.Unknown++
-		}
-		if notReadyNodeNames[pod.Spec.NodeName] || pod.Status.Phase == corev1.PodFailed {
+	podAggregate := aggregateKubernetesPods(pods.Items)
+	summary.Pods.Total = len(podAggregate.ActivePods)
+	summary.Pods.Running = podAggregate.Running
+	summary.Pods.Pending = podAggregate.Pending
+	summary.Pods.Failed = 0
+	summary.Pods.Unknown = 0
+	for i := range podAggregate.ActivePods {
+		pod := &podAggregate.ActivePods[i]
+		classification := classifyKubernetesPod(pod)
+		if notReadyNodeNames[pod.Spec.NodeName] || classification.Problem {
 			impactedPods[pod.Namespace+"/"+pod.Name] = true
 			impactedPodUIDs[string(pod.UID)] = true
 		}
@@ -612,6 +608,11 @@ func collectKubernetesClusterSummary(cluster moldKubernetesCluster) (moldKuberne
 			}
 		}
 		addPodResources(&summary.Resources, pod)
+	}
+	// Pod conditions are event/history data and remain available independently
+	// from the active resource count above.
+	for i := range pods.Items {
+		pod := &pods.Items[i]
 		for _, condition := range pod.Status.Conditions {
 			if condition.LastTransitionTime.IsZero() {
 				continue

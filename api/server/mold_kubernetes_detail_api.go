@@ -246,6 +246,7 @@ type kubernetesNodeDetail struct {
 	ImpactedServiceCount               *int                        `json:"impactedServiceCount,omitempty"`
 	SingleReplicaWorkloadCount         *int                        `json:"singleReplicaWorkloadCount,omitempty"`
 	LocalStorageDependentWorkloadCount *int                        `json:"localStorageDependentWorkloadCount,omitempty"`
+	AssignedWorkloads                  []kubernetesObjectReference `json:"assignedWorkloads,omitempty"`
 	RelationshipConfidence             string                      `json:"relationshipConfidence"`
 }
 
@@ -469,47 +470,20 @@ func handleMoldKubernetesNodeDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if podErr == nil {
-		podCount, running, pending, failed, restartPods, oomKilled := len(pods.Items), 0, 0, 0, 0, 0
+		podAggregate := aggregateKubernetesPods(pods.Items)
+		podCount, running, pending, failed := len(podAggregate.ActivePods), podAggregate.Running, podAggregate.Pending, 0
 		impactedPods := make(map[string]bool)
-		localStorageWorkloads := make(map[string]bool)
-		for i := range pods.Items {
-			pod := &pods.Items[i]
-			switch pod.Status.Phase {
-			case corev1.PodRunning:
-				running++
-			case corev1.PodPending:
-				pending++
-			case corev1.PodFailed:
-				failed++
-			}
-			problem, restarted, oom := podProblemState(pod)
-			if problem || !kubernetesNodeReady(node) {
+		for i := range podAggregate.ProblemPods {
+			pod := &podAggregate.ProblemPods[i]
+			if !kubernetesNodeReady(node) || classifyKubernetesPod(pod).Problem {
 				impactedPods[string(pod.UID)] = true
 			}
-			if restarted {
-				restartPods++
-			}
-			if oom {
-				oomKilled++
-			}
-			if problem {
-				detail.ProblemPods = append(detail.ProblemPods, kubernetesObjectReference{UID: string(pod.UID), Kind: "Pod", Name: pod.Name, Namespace: pod.Namespace})
-			}
-			for _, volume := range pod.Spec.Volumes {
-				if volume.HostPath != nil {
-					workloadID := string(pod.UID)
-					if len(pod.OwnerReferences) > 0 {
-						workloadID = string(pod.OwnerReferences[0].UID)
-					}
-					localStorageWorkloads[workloadID] = true
-					break
-				}
-			}
+			detail.ProblemPods = append(detail.ProblemPods, kubernetesObjectReference{UID: string(pod.UID), Kind: "Pod", Name: pod.Name, Namespace: pod.Namespace})
 		}
 		detail.PodCount, detail.RunningPodCount, detail.PendingPodCount, detail.FailedPodCount = &podCount, &running, &pending, &failed
-		detail.RestartPodCount, detail.OOMKilledPodCount = &restartPods, &oomKilled
-		impactedPodCount, localStorageCount := len(impactedPods), len(localStorageWorkloads)
-		detail.ImpactedPodCount, detail.LocalStorageDependentWorkloadCount = &impactedPodCount, &localStorageCount
+		detail.RestartPodCount, detail.OOMKilledPodCount = &podAggregate.Restarted, &podAggregate.OOMKilled
+		impactedPodCount := len(impactedPods)
+		detail.ImpactedPodCount = &impactedPodCount
 		if slices, sliceErr := client.DiscoveryV1().EndpointSlices("").List(ctx, metav1.ListOptions{}); sliceErr == nil {
 			impactedServices := make(map[string]bool)
 			for _, slice := range slices.Items {
@@ -523,38 +497,7 @@ func handleMoldKubernetesNodeDetail(w http.ResponseWriter, r *http.Request) {
 			count := len(impactedServices)
 			detail.ImpactedServiceCount = &count
 		}
-		if deployments, deploymentErr := client.AppsV1().Deployments("").List(ctx, metav1.ListOptions{}); deploymentErr == nil {
-			if replicaSets, replicaSetErr := client.AppsV1().ReplicaSets("").List(ctx, metav1.ListOptions{}); replicaSetErr == nil {
-				if statefulSets, statefulSetErr := client.AppsV1().StatefulSets("").List(ctx, metav1.ListOptions{}); statefulSetErr == nil {
-					singleOwners := make(map[string]bool)
-					for _, deployment := range deployments.Items {
-						if deployment.Spec.Replicas != nil && *deployment.Spec.Replicas == 1 {
-							singleOwners[string(deployment.UID)] = true
-						}
-					}
-					for _, statefulSet := range statefulSets.Items {
-						if statefulSet.Spec.Replicas != nil && *statefulSet.Spec.Replicas == 1 {
-							singleOwners[string(statefulSet.UID)] = true
-						}
-					}
-					for _, replicaSet := range replicaSets.Items {
-						if len(replicaSet.OwnerReferences) > 0 {
-							singleOwners[string(replicaSet.UID)] = singleOwners[string(replicaSet.OwnerReferences[0].UID)]
-						} else if replicaSet.Spec.Replicas != nil && *replicaSet.Spec.Replicas == 1 {
-							singleOwners[string(replicaSet.UID)] = true
-						}
-					}
-					workloads := make(map[string]bool)
-					for _, pod := range pods.Items {
-						if len(pod.OwnerReferences) > 0 && singleOwners[string(pod.OwnerReferences[0].UID)] {
-							workloads[string(pod.OwnerReferences[0].UID)] = true
-						}
-					}
-					count := len(workloads)
-					detail.SingleReplicaWorkloadCount = &count
-				}
-			}
-		}
+		populateKubernetesNodeWorkloadSummary(ctx, client, podAggregate.ActivePods, &detail)
 	}
 	setKubernetesCollectionState(cluster.ID, kubernetesHealthy, nil)
 	writeJSON(w, detail)
@@ -588,23 +531,12 @@ func handleMoldKubernetesNamespaceDetail(w http.ResponseWriter, r *http.Request)
 	slices, sliceErr := client.DiscoveryV1().EndpointSlices(ns.Name).List(ctx, metav1.ListOptions{})
 	detail := kubernetesNamespaceDetail{ClusterID: cluster.ID, UID: string(ns.UID), Name: ns.Name, Phase: string(ns.Status.Phase), CreatedAt: ns.CreationTimestamp.Time, Labels: ns.Labels, Terminating: ns.DeletionTimestamp != nil}
 	if podErr == nil {
-		podCount, running, pending, failed, crashLoop, oomKilled := len(pods.Items), 0, 0, 0, 0, 0
+		podAggregate := aggregateKubernetesPods(pods.Items)
+		podCount, running, pending, failed, crashLoop, oomKilled := len(podAggregate.ActivePods), podAggregate.Running, podAggregate.Pending, 0, 0, podAggregate.OOMKilled
 		var reqCPU, limCPU, reqMem, limMem int64
-		for i := range pods.Items {
-			pod := &pods.Items[i]
-			switch pod.Status.Phase {
-			case corev1.PodRunning:
-				running++
-			case corev1.PodPending:
-				pending++
-			case corev1.PodFailed:
-				failed++
-			}
-			_, _, oom := podProblemState(pod)
-			if oom {
-				oomKilled++
-			}
-			if podCrashLoop(pod) {
+		for i := range podAggregate.ActivePods {
+			pod := &podAggregate.ActivePods[i]
+			if classifyKubernetesPod(pod).CrashLoop {
 				crashLoop++
 			}
 			for _, c := range pod.Spec.Containers {
@@ -839,33 +771,174 @@ func writeKubernetesDetailError(w http.ResponseWriter, clusterID string, err err
 	http.Error(w, "Kubernetes 상세 정보를 수집하지 못했습니다.", code)
 }
 
-func podProblemState(pod *corev1.Pod) (problem, restarted, oom bool) {
-	if pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodPending {
-		problem = true
+// populateKubernetesNodeWorkloadSummary keeps the node panel's workload metrics
+// on one owner-reference based source:
+// Pod -> ReplicaSet -> Deployment, Pod -> StatefulSet/DaemonSet,
+// and Pod -> Job -> CronJob. ReplicaSets never become visible workloads.
+func populateKubernetesNodeWorkloadSummary(ctx context.Context, client kubernetes.Interface, pods []corev1.Pod, detail *kubernetesNodeDetail) {
+	deployments, deploymentErr := client.AppsV1().Deployments("").List(ctx, metav1.ListOptions{})
+	replicaSets, replicaSetErr := client.AppsV1().ReplicaSets("").List(ctx, metav1.ListOptions{})
+	statefulSets, statefulSetErr := client.AppsV1().StatefulSets("").List(ctx, metav1.ListOptions{})
+	daemonSets, daemonSetErr := client.AppsV1().DaemonSets("").List(ctx, metav1.ListOptions{})
+	jobs, jobErr := client.BatchV1().Jobs("").List(ctx, metav1.ListOptions{})
+	cronJobs, cronJobErr := client.BatchV1().CronJobs("").List(ctx, metav1.ListOptions{})
+	if deploymentErr != nil || replicaSetErr != nil || statefulSetErr != nil || daemonSetErr != nil || jobErr != nil || cronJobErr != nil {
+		return
 	}
-	statuses := append(append([]corev1.ContainerStatus{}, pod.Status.InitContainerStatuses...), pod.Status.ContainerStatuses...)
-	for _, status := range statuses {
-		if status.RestartCount > 0 {
-			restarted = true
-		}
-		if status.State.Waiting != nil && status.State.Waiting.Reason == "CrashLoopBackOff" {
-			problem = true
-		}
-		if (status.State.Terminated != nil && status.State.Terminated.Reason == "OOMKilled") || (status.LastTerminationState.Terminated != nil && status.LastTerminationState.Terminated.Reason == "OOMKilled") {
-			problem = true
-			oom = true
+
+	workloads := make(map[string]kubernetesObjectReference)
+	singleReplicaUIDs := make(map[string]bool)
+	replicaSetOwners := make(map[string]string)
+	jobOwners := make(map[string]string)
+	for i := range deployments.Items {
+		item := &deployments.Items[i]
+		uid := string(item.UID)
+		workloads[uid] = kubernetesObjectReference{UID: uid, Kind: "Deployment", Name: item.Name, Namespace: item.Namespace}
+		singleReplicaUIDs[uid] = item.Spec.Replicas != nil && *item.Spec.Replicas == 1
+	}
+	for i := range statefulSets.Items {
+		item := &statefulSets.Items[i]
+		uid := string(item.UID)
+		workloads[uid] = kubernetesObjectReference{UID: uid, Kind: "StatefulSet", Name: item.Name, Namespace: item.Namespace}
+		singleReplicaUIDs[uid] = item.Spec.Replicas != nil && *item.Spec.Replicas == 1
+	}
+	for i := range daemonSets.Items {
+		item := &daemonSets.Items[i]
+		uid := string(item.UID)
+		workloads[uid] = kubernetesObjectReference{UID: uid, Kind: "DaemonSet", Name: item.Name, Namespace: item.Namespace}
+	}
+	for i := range jobs.Items {
+		item := &jobs.Items[i]
+		uid := string(item.UID)
+		workloads[uid] = kubernetesObjectReference{UID: uid, Kind: "Job", Name: item.Name, Namespace: item.Namespace}
+		if owner := kubernetesControllerOwner(item.OwnerReferences); owner != nil && strings.EqualFold(owner.Kind, "CronJob") {
+			jobOwners[uid] = string(owner.UID)
 		}
 	}
-	return
+	for i := range cronJobs.Items {
+		item := &cronJobs.Items[i]
+		uid := string(item.UID)
+		workloads[uid] = kubernetesObjectReference{UID: uid, Kind: "CronJob", Name: item.Name, Namespace: item.Namespace}
+	}
+	for i := range replicaSets.Items {
+		item := &replicaSets.Items[i]
+		if owner := kubernetesControllerOwner(item.OwnerReferences); owner != nil && strings.EqualFold(owner.Kind, "Deployment") {
+			replicaSetOwners[string(item.UID)] = string(owner.UID)
+		}
+	}
+
+	claimsByKey := make(map[string]corev1.PersistentVolumeClaim)
+	if claims, err := client.CoreV1().PersistentVolumeClaims("").List(ctx, metav1.ListOptions{}); err == nil {
+		for i := range claims.Items {
+			claim := claims.Items[i]
+			claimsByKey[claim.Namespace+"/"+claim.Name] = claim
+		}
+	}
+	volumesByName := make(map[string]corev1.PersistentVolume)
+	if volumes, err := client.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{}); err == nil {
+		for i := range volumes.Items {
+			volumesByName[volumes.Items[i].Name] = volumes.Items[i]
+		}
+	}
+	localStorageClasses := make(map[string]bool)
+	if classes, err := client.StorageV1().StorageClasses().List(ctx, metav1.ListOptions{}); err == nil {
+		for i := range classes.Items {
+			class := classes.Items[i]
+			localStorageClasses[class.Name] = strings.Contains(strings.ToLower(class.Name), "local-path") ||
+				strings.Contains(strings.ToLower(class.Provisioner), "local-path")
+		}
+	}
+
+	assigned := make(map[string]kubernetesObjectReference)
+	singleReplica := make(map[string]bool)
+	localStorage := make(map[string]bool)
+	for i := range pods {
+		pod := &pods[i]
+		owner := kubernetesControllerOwner(pod.OwnerReferences)
+		if owner == nil {
+			continue
+		}
+		workloadUID := string(owner.UID)
+		switch strings.ToLower(owner.Kind) {
+		case "replicaset":
+			workloadUID = replicaSetOwners[workloadUID]
+		case "job":
+			if cronJobUID := jobOwners[workloadUID]; cronJobUID != "" {
+				workloadUID = cronJobUID
+			}
+		}
+		workload, found := workloads[workloadUID]
+		if !found {
+			continue
+		}
+		assigned[workloadUID] = workload
+		if singleReplicaUIDs[workloadUID] {
+			singleReplica[workloadUID] = true
+		}
+		if kubernetesPodUsesNodeLocalStorage(pod, claimsByKey, volumesByName, localStorageClasses) {
+			localStorage[workloadUID] = true
+		}
+	}
+
+	detail.AssignedWorkloads = make([]kubernetesObjectReference, 0, len(assigned))
+	for _, workload := range assigned {
+		detail.AssignedWorkloads = append(detail.AssignedWorkloads, workload)
+	}
+	sort.Slice(detail.AssignedWorkloads, func(i, j int) bool {
+		if detail.AssignedWorkloads[i].Kind == detail.AssignedWorkloads[j].Kind {
+			return detail.AssignedWorkloads[i].Name < detail.AssignedWorkloads[j].Name
+		}
+		return detail.AssignedWorkloads[i].Kind < detail.AssignedWorkloads[j].Kind
+	})
+	singleReplicaCount, localStorageCount := len(singleReplica), len(localStorage)
+	detail.SingleReplicaWorkloadCount = &singleReplicaCount
+	detail.LocalStorageDependentWorkloadCount = &localStorageCount
 }
 
-func podCrashLoop(pod *corev1.Pod) bool {
-	for _, status := range pod.Status.ContainerStatuses {
-		if status.State.Waiting != nil && status.State.Waiting.Reason == "CrashLoopBackOff" {
+func kubernetesControllerOwner(owners []metav1.OwnerReference) *metav1.OwnerReference {
+	for i := range owners {
+		if owners[i].Controller != nil && *owners[i].Controller {
+			return &owners[i]
+		}
+	}
+	if len(owners) > 0 {
+		return &owners[0]
+	}
+	return nil
+}
+
+func kubernetesPodUsesNodeLocalStorage(
+	pod *corev1.Pod,
+	claims map[string]corev1.PersistentVolumeClaim,
+	volumes map[string]corev1.PersistentVolume,
+	localStorageClasses map[string]bool,
+) bool {
+	for _, podVolume := range pod.Spec.Volumes {
+		if podVolume.HostPath != nil {
 			return true
+		}
+		if podVolume.PersistentVolumeClaim == nil {
+			continue
+		}
+		claim, found := claims[pod.Namespace+"/"+podVolume.PersistentVolumeClaim.ClaimName]
+		if !found {
+			continue
+		}
+		if claim.Spec.StorageClassName != nil && localStorageClasses[*claim.Spec.StorageClassName] {
+			return true
+		}
+		if volume, found := volumes[claim.Spec.VolumeName]; found {
+			if volume.Spec.Local != nil || volume.Spec.HostPath != nil || localStorageClasses[volume.Spec.StorageClassName] {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+func podProblemState(pod *corev1.Pod) (problem, restarted, oom bool) {
+	classification := classifyKubernetesPod(pod)
+	return classification.Problem, classification.Restarted, classification.OOMKilled
 }
 
 func buildKubernetesPodDetail(clusterID string, pod *corev1.Pod) kubernetesPodDetail {
