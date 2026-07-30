@@ -67,19 +67,30 @@ type kubernetesStatusCount struct {
 }
 
 type kubernetesResourceSummary struct {
-	CapacityCPUCores       float64 `json:"capacityCpuCores,omitempty"`
-	AllocatableCPUCores    float64 `json:"allocatableCpuCores,omitempty"`
-	CapacityMemoryBytes    int64   `json:"capacityMemoryBytes,omitempty"`
-	AllocatableMemoryBytes int64   `json:"allocatableMemoryBytes,omitempty"`
-	RequestsCPUCores       float64 `json:"requestsCpuCores,omitempty"`
-	LimitsCPUCores         float64 `json:"limitsCpuCores,omitempty"`
-	RequestsMemoryBytes    int64   `json:"requestsMemoryBytes,omitempty"`
-	LimitsMemoryBytes      int64   `json:"limitsMemoryBytes,omitempty"`
-	UsageCPUCores          float64 `json:"usageCpuCores,omitempty"`
-	UsageMemoryBytes       int64   `json:"usageMemoryBytes,omitempty"`
-	CPUUsagePercent        float64 `json:"cpuUsagePercent,omitempty"`
-	MemoryUsagePercent     float64 `json:"memoryUsagePercent,omitempty"`
-	MetricsAvailable       bool    `json:"metricsAvailable"`
+	CapacityCPUCores       float64                      `json:"capacityCpuCores,omitempty"`
+	AllocatableCPUCores    float64                      `json:"allocatableCpuCores,omitempty"`
+	CapacityMemoryBytes    int64                        `json:"capacityMemoryBytes,omitempty"`
+	AllocatableMemoryBytes int64                        `json:"allocatableMemoryBytes,omitempty"`
+	CapacityPods           int64                        `json:"capacityPods,omitempty"`
+	AllocatablePods        int64                        `json:"allocatablePods,omitempty"`
+	RequestsCPUCores       float64                      `json:"requestsCpuCores,omitempty"`
+	LimitsCPUCores         float64                      `json:"limitsCpuCores,omitempty"`
+	RequestsMemoryBytes    int64                        `json:"requestsMemoryBytes,omitempty"`
+	LimitsMemoryBytes      int64                        `json:"limitsMemoryBytes,omitempty"`
+	UsageCPUCores          float64                      `json:"usageCpuCores,omitempty"`
+	UsageMemoryBytes       int64                        `json:"usageMemoryBytes,omitempty"`
+	CPUUsagePercent        float64                      `json:"cpuUsagePercent,omitempty"`
+	MemoryUsagePercent     float64                      `json:"memoryUsagePercent,omitempty"`
+	MetricsAvailable       bool                         `json:"metricsAvailable"`
+	PodUsage               []kubernetesPodResourceUsage `json:"podUsage,omitempty"`
+}
+
+type kubernetesPodResourceUsage struct {
+	Namespace        string  `json:"namespace"`
+	Name             string  `json:"name"`
+	NodeName         string  `json:"nodeName,omitempty"`
+	UsageCPUCores    float64 `json:"usageCpuCores,omitempty"`
+	UsageMemoryBytes int64   `json:"usageMemoryBytes,omitempty"`
 }
 
 type kubernetesRiskItem struct {
@@ -140,6 +151,18 @@ type moldKubernetesClusterSummary struct {
 type kubernetesNodeMetricsList struct {
 	Items []struct {
 		Usage corev1.ResourceList `json:"usage"`
+	} `json:"items"`
+}
+
+type kubernetesPodMetricsList struct {
+	Items []struct {
+		Metadata struct {
+			Namespace string `json:"namespace"`
+			Name      string `json:"name"`
+		} `json:"metadata"`
+		Containers []struct {
+			Usage corev1.ResourceList `json:"usage"`
+		} `json:"containers"`
 	} `json:"items"`
 }
 
@@ -683,6 +706,7 @@ func collectKubernetesClusterSummary(cluster moldKubernetesCluster) (moldKuberne
 	}
 
 	collectKubernetesNodeMetrics(ctx, clientset, &summary.Resources)
+	collectKubernetesPodMetrics(ctx, clientset, &summary.Resources, podAggregate.ActivePods)
 	summary.AffectedServices = len(impactedServices)
 	summary.CurrentlyImpactedServiceCount = summary.AffectedServices
 	summary.LocalStorageDependentWorkloadCount = len(localStorageWorkloads)
@@ -768,12 +792,15 @@ func nodeConditionSeverity(condition corev1.NodeCondition) string {
 func addResourceList(summary *kubernetesResourceSummary, resources corev1.ResourceList, capacity bool) {
 	cpu := resources.Cpu()
 	memory := resources.Memory()
+	pods := resources.Pods()
 	if capacity {
 		summary.CapacityCPUCores += float64(cpu.MilliValue()) / 1000
 		summary.CapacityMemoryBytes += memory.Value()
+		summary.CapacityPods += pods.Value()
 	} else {
 		summary.AllocatableCPUCores += float64(cpu.MilliValue()) / 1000
 		summary.AllocatableMemoryBytes += memory.Value()
+		summary.AllocatablePods += pods.Value()
 	}
 }
 
@@ -805,6 +832,40 @@ func collectKubernetesNodeMetrics(ctx context.Context, clientset kubernetes.Inte
 	}
 	if summary.AllocatableMemoryBytes > 0 {
 		summary.MemoryUsagePercent = float64(summary.UsageMemoryBytes) / float64(summary.AllocatableMemoryBytes) * 100
+	}
+}
+
+// collectKubernetesPodMetrics augments the cluster aggregate with drill-down
+// data only. It deliberately does not modify the existing cluster usage totals.
+func collectKubernetesPodMetrics(ctx context.Context, clientset kubernetes.Interface, summary *kubernetesResourceSummary, activePods []corev1.Pod) {
+	raw, err := clientset.CoreV1().RESTClient().Get().AbsPath("/apis/metrics.k8s.io/v1beta1/pods").DoRaw(ctx)
+	if err != nil {
+		return
+	}
+	var metrics kubernetesPodMetricsList
+	if err := json.Unmarshal(raw, &metrics); err != nil {
+		return
+	}
+	activeByKey := make(map[string]*corev1.Pod, len(activePods))
+	for i := range activePods {
+		pod := &activePods[i]
+		activeByKey[pod.Namespace+"/"+pod.Name] = pod
+	}
+	for _, item := range metrics.Items {
+		pod := activeByKey[item.Metadata.Namespace+"/"+item.Metadata.Name]
+		if pod == nil {
+			continue
+		}
+		usage := kubernetesPodResourceUsage{
+			Namespace: item.Metadata.Namespace,
+			Name:      item.Metadata.Name,
+			NodeName:  pod.Spec.NodeName,
+		}
+		for _, container := range item.Containers {
+			usage.UsageCPUCores += float64(container.Usage.Cpu().MilliValue()) / 1000
+			usage.UsageMemoryBytes += container.Usage.Memory().Value()
+		}
+		summary.PodUsage = append(summary.PodUsage, usage)
 	}
 }
 
