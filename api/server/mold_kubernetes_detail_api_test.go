@@ -7,9 +7,42 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
+
+func TestKubernetesNamespaceResourcesUsesOneActivePodContainerDataset(t *testing.T) {
+	pods := []corev1.Pod{{Spec: corev1.PodSpec{
+		Containers: []corev1.Container{
+			{Name: "app", Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m"), corev1.ResourceMemory: resource.MustParse("256Mi")},
+				Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+			}},
+			{Name: "sidecar", Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
+			}},
+		},
+		InitContainers: []corev1.Container{{Name: "prepare", Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("750m"), corev1.ResourceMemory: resource.MustParse("512Mi")},
+			Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1"), corev1.ResourceMemory: resource.MustParse("1Gi")},
+		}}},
+	}}}
+
+	configuration := kubernetesNamespaceResources(pods)
+	if !configuration.Collected || configuration.TotalContainers != 3 {
+		t.Fatalf("collection=%v total=%d, want true/3", configuration.Collected, configuration.TotalContainers)
+	}
+	if configuration.CPURequests.ConfiguredContainers != 3 || configuration.MemoryLimits.ConfiguredContainers != 1 {
+		t.Fatalf("configured CPU requests=%d memory limits=%d, want 3/1", configuration.CPURequests.ConfiguredContainers, configuration.MemoryLimits.ConfiguredContainers)
+	}
+	if configuration.CPURequests.Cores != 0.75 || configuration.CPULimits.Cores != 1 {
+		t.Fatalf("effective CPU requests=%g limits=%g, want 0.75/1", configuration.CPURequests.Cores, configuration.CPULimits.Cores)
+	}
+	if configuration.MemoryRequests.Bytes != 512*1024*1024 || configuration.MemoryLimits.Bytes != 1024*1024*1024 {
+		t.Fatalf("unexpected effective memory requests=%g limits=%g", configuration.MemoryRequests.Bytes, configuration.MemoryLimits.Bytes)
+	}
+}
 
 func TestBuildKubernetesPodDetailDoesNotExposeEnvironmentOrSecretValues(t *testing.T) {
 	started := true

@@ -253,25 +253,57 @@ type kubernetesNodeDetail struct {
 }
 
 type kubernetesNamespaceDetail struct {
-	ClusterID                       string            `json:"clusterId"`
-	UID                             string            `json:"uid"`
-	Name                            string            `json:"name"`
-	Phase                           string            `json:"phase"`
-	CreatedAt                       time.Time         `json:"createdAt"`
-	Labels                          map[string]string `json:"labels,omitempty"`
-	Terminating                     bool              `json:"terminating"`
-	PodCount                        *int              `json:"podCount,omitempty"`
-	ServiceCount                    *int              `json:"serviceCount,omitempty"`
-	RunningPodCount                 *int              `json:"runningPodCount,omitempty"`
-	PendingPodCount                 *int              `json:"pendingPodCount,omitempty"`
-	FailedPodCount                  *int              `json:"failedPodCount,omitempty"`
-	CrashLoopPodCount               *int              `json:"crashLoopPodCount,omitempty"`
-	OOMKilledPodCount               *int              `json:"oomKilledPodCount,omitempty"`
-	EndpointUnavailableServiceCount *int              `json:"endpointUnavailableServiceCount,omitempty"`
-	CPURequests                     string            `json:"cpuRequests"`
-	CPULimits                       string            `json:"cpuLimits"`
-	MemoryRequests                  string            `json:"memoryRequests"`
-	MemoryLimits                    string            `json:"memoryLimits"`
+	ClusterID                       string                                    `json:"clusterId"`
+	UID                             string                                    `json:"uid"`
+	Name                            string                                    `json:"name"`
+	Phase                           string                                    `json:"phase"`
+	CreatedAt                       time.Time                                 `json:"createdAt"`
+	Labels                          map[string]string                         `json:"labels,omitempty"`
+	Annotations                     map[string]string                         `json:"annotations,omitempty"`
+	Terminating                     bool                                      `json:"terminating"`
+	PodCollected                    bool                                      `json:"podCollected"`
+	ServiceCollected                bool                                      `json:"serviceCollected"`
+	EndpointSliceCollected          bool                                      `json:"endpointSliceCollected"`
+	EventsCollected                 bool                                      `json:"eventsCollected"`
+	ResourceQuotaCollected          bool                                      `json:"resourceQuotaCollected"`
+	LimitRangeCollected             bool                                      `json:"limitRangeCollected"`
+	PodCount                        *int                                      `json:"podCount,omitempty"`
+	ServiceCount                    *int                                      `json:"serviceCount,omitempty"`
+	RunningPodCount                 *int                                      `json:"runningPodCount,omitempty"`
+	PendingPodCount                 *int                                      `json:"pendingPodCount,omitempty"`
+	FailedPodCount                  *int                                      `json:"failedPodCount,omitempty"`
+	CrashLoopPodCount               *int                                      `json:"crashLoopPodCount,omitempty"`
+	OOMKilledPodCount               *int                                      `json:"oomKilledPodCount,omitempty"`
+	EndpointUnavailableServiceCount *int                                      `json:"endpointUnavailableServiceCount,omitempty"`
+	CPURequests                     string                                    `json:"cpuRequests"`
+	CPULimits                       string                                    `json:"cpuLimits"`
+	MemoryRequests                  string                                    `json:"memoryRequests"`
+	MemoryLimits                    string                                    `json:"memoryLimits"`
+	ResourceConfiguration           *kubernetesNamespaceResourceConfiguration `json:"resourceConfiguration,omitempty"`
+	ResourceQuotaCount              *int                                      `json:"resourceQuotaCount,omitempty"`
+	LimitRangeCount                 *int                                      `json:"limitRangeCount,omitempty"`
+	ResourceQuotas                  []corev1.ResourceQuota                    `json:"resourceQuotas,omitempty"`
+	LimitRanges                     []corev1.LimitRange                       `json:"limitRanges,omitempty"`
+	Events                          []corev1.Event                            `json:"events,omitempty"`
+}
+
+type kubernetesNamespaceCPUConfiguration struct {
+	ConfiguredContainers int     `json:"configuredContainers"`
+	Cores                float64 `json:"cores"`
+}
+
+type kubernetesNamespaceMemoryConfiguration struct {
+	ConfiguredContainers int     `json:"configuredContainers"`
+	Bytes                float64 `json:"bytes"`
+}
+
+type kubernetesNamespaceResourceConfiguration struct {
+	Collected       bool                                   `json:"collected"`
+	TotalContainers int                                    `json:"totalContainers"`
+	CPURequests     kubernetesNamespaceCPUConfiguration    `json:"cpuRequests"`
+	CPULimits       kubernetesNamespaceCPUConfiguration    `json:"cpuLimits"`
+	MemoryRequests  kubernetesNamespaceMemoryConfiguration `json:"memoryRequests"`
+	MemoryLimits    kubernetesNamespaceMemoryConfiguration `json:"memoryLimits"`
 }
 
 type kubernetesContainerDetail struct {
@@ -538,6 +570,87 @@ func handleMoldKubernetesNodeDetail(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, detail)
 }
 
+type kubernetesContainerResourceValues struct {
+	cpuRequests, cpuLimits, memoryRequests, memoryLimits float64
+}
+
+func kubernetesContainerResources(container corev1.Container) kubernetesContainerResourceValues {
+	values := kubernetesContainerResourceValues{}
+	if quantity, found := container.Resources.Requests[corev1.ResourceCPU]; found {
+		values.cpuRequests = quantity.AsApproximateFloat64()
+	}
+	if quantity, found := container.Resources.Limits[corev1.ResourceCPU]; found {
+		values.cpuLimits = quantity.AsApproximateFloat64()
+	}
+	if quantity, found := container.Resources.Requests[corev1.ResourceMemory]; found {
+		values.memoryRequests = quantity.AsApproximateFloat64()
+	}
+	if quantity, found := container.Resources.Limits[corev1.ResourceMemory]; found {
+		values.memoryLimits = quantity.AsApproximateFloat64()
+	}
+	return values
+}
+
+func addKubernetesContainerConfiguration(configuration *kubernetesNamespaceResourceConfiguration, container corev1.Container) kubernetesContainerResourceValues {
+	configuration.TotalContainers++
+	if _, found := container.Resources.Requests[corev1.ResourceCPU]; found {
+		configuration.CPURequests.ConfiguredContainers++
+	}
+	if _, found := container.Resources.Limits[corev1.ResourceCPU]; found {
+		configuration.CPULimits.ConfiguredContainers++
+	}
+	if _, found := container.Resources.Requests[corev1.ResourceMemory]; found {
+		configuration.MemoryRequests.ConfiguredContainers++
+	}
+	if _, found := container.Resources.Limits[corev1.ResourceMemory]; found {
+		configuration.MemoryLimits.ConfiguredContainers++
+	}
+	return kubernetesContainerResources(container)
+}
+
+func maxKubernetesContainerResourceValues(current, candidate kubernetesContainerResourceValues) kubernetesContainerResourceValues {
+	if candidate.cpuRequests > current.cpuRequests {
+		current.cpuRequests = candidate.cpuRequests
+	}
+	if candidate.cpuLimits > current.cpuLimits {
+		current.cpuLimits = candidate.cpuLimits
+	}
+	if candidate.memoryRequests > current.memoryRequests {
+		current.memoryRequests = candidate.memoryRequests
+	}
+	if candidate.memoryLimits > current.memoryLimits {
+		current.memoryLimits = candidate.memoryLimits
+	}
+	return current
+}
+
+// Kubernetes scheduling evaluates a Pod using the larger of the sum of its
+// application containers and the maximum init-container value. Counts still
+// include every application and init container whose field is explicitly set.
+func kubernetesNamespaceResources(pods []corev1.Pod) kubernetesNamespaceResourceConfiguration {
+	configuration := kubernetesNamespaceResourceConfiguration{Collected: true}
+	for i := range pods {
+		application := kubernetesContainerResourceValues{}
+		for _, container := range pods[i].Spec.Containers {
+			value := addKubernetesContainerConfiguration(&configuration, container)
+			application.cpuRequests += value.cpuRequests
+			application.cpuLimits += value.cpuLimits
+			application.memoryRequests += value.memoryRequests
+			application.memoryLimits += value.memoryLimits
+		}
+		initMaximum := kubernetesContainerResourceValues{}
+		for _, container := range pods[i].Spec.InitContainers {
+			initMaximum = maxKubernetesContainerResourceValues(initMaximum, addKubernetesContainerConfiguration(&configuration, container))
+		}
+		effective := maxKubernetesContainerResourceValues(application, initMaximum)
+		configuration.CPURequests.Cores += effective.cpuRequests
+		configuration.CPULimits.Cores += effective.cpuLimits
+		configuration.MemoryRequests.Bytes += effective.memoryRequests
+		configuration.MemoryLimits.Bytes += effective.memoryLimits
+	}
+	return configuration
+}
+
 func handleMoldKubernetesNamespaceDetail(w http.ResponseWriter, r *http.Request) {
 	cluster, client, ctx, cancel, ok := kubernetesDetailRequest(w, r)
 	if !ok {
@@ -564,29 +677,32 @@ func handleMoldKubernetesNamespaceDetail(w http.ResponseWriter, r *http.Request)
 	pods, podErr := client.CoreV1().Pods(ns.Name).List(ctx, metav1.ListOptions{})
 	services, serviceErr := client.CoreV1().Services(ns.Name).List(ctx, metav1.ListOptions{})
 	slices, sliceErr := client.DiscoveryV1().EndpointSlices(ns.Name).List(ctx, metav1.ListOptions{})
-	detail := kubernetesNamespaceDetail{ClusterID: cluster.ID, UID: string(ns.UID), Name: ns.Name, Phase: string(ns.Status.Phase), CreatedAt: ns.CreationTimestamp.Time, Labels: ns.Labels, Terminating: ns.DeletionTimestamp != nil}
+	quotas, quotaErr := client.CoreV1().ResourceQuotas(ns.Name).List(ctx, metav1.ListOptions{})
+	limitRanges, limitRangeErr := client.CoreV1().LimitRanges(ns.Name).List(ctx, metav1.ListOptions{})
+	events, eventErr := client.CoreV1().Events(ns.Name).List(ctx, metav1.ListOptions{})
+	detail := kubernetesNamespaceDetail{
+		ClusterID: cluster.ID, UID: string(ns.UID), Name: ns.Name, Phase: string(ns.Status.Phase), CreatedAt: ns.CreationTimestamp.Time,
+		Labels: ns.Labels, Annotations: ns.Annotations, Terminating: ns.DeletionTimestamp != nil,
+		PodCollected: podErr == nil, ServiceCollected: serviceErr == nil, EndpointSliceCollected: sliceErr == nil,
+		EventsCollected: eventErr == nil, ResourceQuotaCollected: quotaErr == nil, LimitRangeCollected: limitRangeErr == nil,
+	}
 	if podErr == nil {
 		podAggregate := aggregateKubernetesPods(pods.Items)
 		podCount, running, pending, failed, crashLoop, oomKilled := len(podAggregate.ActivePods), podAggregate.Running, podAggregate.Pending, 0, 0, podAggregate.OOMKilled
-		var reqCPU, limCPU, reqMem, limMem int64
 		for i := range podAggregate.ActivePods {
 			pod := &podAggregate.ActivePods[i]
 			if classifyKubernetesPod(pod).CrashLoop {
 				crashLoop++
 			}
-			for _, c := range pod.Spec.Containers {
-				reqCPU += c.Resources.Requests.Cpu().MilliValue()
-				limCPU += c.Resources.Limits.Cpu().MilliValue()
-				reqMem += c.Resources.Requests.Memory().Value()
-				limMem += c.Resources.Limits.Memory().Value()
-			}
 		}
+		resourceConfiguration := kubernetesNamespaceResources(podAggregate.ActivePods)
 		detail.PodCount, detail.RunningPodCount, detail.PendingPodCount, detail.FailedPodCount = &podCount, &running, &pending, &failed
 		detail.CrashLoopPodCount, detail.OOMKilledPodCount = &crashLoop, &oomKilled
-		detail.CPURequests = fmt.Sprintf("%dm", reqCPU)
-		detail.CPULimits = fmt.Sprintf("%dm", limCPU)
-		detail.MemoryRequests = fmt.Sprintf("%d", reqMem)
-		detail.MemoryLimits = fmt.Sprintf("%d", limMem)
+		detail.ResourceConfiguration = &resourceConfiguration
+		detail.CPURequests = fmt.Sprintf("%gm", resourceConfiguration.CPURequests.Cores*1000)
+		detail.CPULimits = fmt.Sprintf("%gm", resourceConfiguration.CPULimits.Cores*1000)
+		detail.MemoryRequests = fmt.Sprintf("%g", resourceConfiguration.MemoryRequests.Bytes)
+		detail.MemoryLimits = fmt.Sprintf("%g", resourceConfiguration.MemoryLimits.Bytes)
 	}
 	if serviceErr == nil {
 		serviceCount := len(services.Items)
@@ -609,6 +725,19 @@ func handleMoldKubernetesNamespaceDetail(w http.ResponseWriter, r *http.Request)
 			}
 		}
 		detail.EndpointUnavailableServiceCount = &unavailable
+	}
+	if quotaErr == nil {
+		count := len(quotas.Items)
+		detail.ResourceQuotaCount = &count
+		detail.ResourceQuotas = quotas.Items
+	}
+	if limitRangeErr == nil {
+		count := len(limitRanges.Items)
+		detail.LimitRangeCount = &count
+		detail.LimitRanges = limitRanges.Items
+	}
+	if eventErr == nil {
+		detail.Events = events.Items
 	}
 	setKubernetesCollectionState(cluster.ID, kubernetesHealthy, nil)
 	writeJSON(w, detail)
