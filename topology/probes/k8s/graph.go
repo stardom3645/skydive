@@ -18,6 +18,8 @@
 package k8s
 
 import (
+	"time"
+
 	"github.com/skydive-project/skydive/graffiti/filters"
 	"github.com/skydive-project/skydive/graffiti/graph"
 	"github.com/skydive-project/skydive/graffiti/logging"
@@ -57,6 +59,12 @@ func NewMetadataFields(o metav1.Object) graph.Metadata {
 	m["Name"] = o.GetName()
 	m["Namespace"] = o.GetNamespace()
 	m["Labels"] = o.GetLabels()
+	if createdAt := o.GetCreationTimestamp(); !createdAt.IsZero() {
+		// metav1.Time contains an embedded time.Time whose fields are not
+		// preserved by the generic graph normalizer. Publish the RFC3339 value
+		// explicitly so every Kubernetes resource retains its creation time.
+		m["CreationTimestamp"] = createdAt.Time.UTC().Format(time.RFC3339Nano)
+	}
 	return m
 }
 
