@@ -55,7 +55,7 @@ func newDeploymentProbe(client interface{}, g *graph.Graph) Subprobe {
 func deploymentReplicaSetAreLinked(a, b interface{}) bool {
 	deployment := a.(*v1apps.Deployment)
 	replicaset := b.(*v1apps.ReplicaSet)
-	return MatchNamespace(replicaset, deployment) && matchLabelSelector(replicaset, deployment.Spec.Selector)
+	return MatchNamespace(replicaset, deployment) && controlledBy(replicaset, deployment, "Deployment")
 }
 
 func newDeploymentReplicaSetLinker(manager string) LinkHandler {

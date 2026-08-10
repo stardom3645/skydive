@@ -58,7 +58,10 @@ func NewMetadataFields(o metav1.Object) graph.Metadata {
 	m := graph.Metadata{}
 	m["Name"] = o.GetName()
 	m["Namespace"] = o.GetNamespace()
+	m["UID"] = string(o.GetUID())
 	m["Labels"] = o.GetLabels()
+	m["Annotations"] = o.GetAnnotations()
+	m["OwnerReferences"] = o.GetOwnerReferences()
 	if createdAt := o.GetCreationTimestamp(); !createdAt.IsZero() {
 		// metav1.Time contains an embedded time.Time whose fields are not
 		// preserved by the generic graph normalizer. Publish the RFC3339 value
@@ -66,6 +69,28 @@ func NewMetadataFields(o metav1.Object) graph.Metadata {
 		m["CreationTimestamp"] = createdAt.Time.UTC().Format(time.RFC3339Nano)
 	}
 	return m
+}
+
+// controlledBy uses the Kubernetes controller identity rather than label
+// coincidence. UID is authoritative; name is retained only for objects whose
+// owner UID was not collected by an older API source.
+func controlledBy(child, parent metav1.Object, parentKind string) bool {
+	parentUID := string(parent.GetUID())
+	for _, owner := range child.GetOwnerReferences() {
+		if owner.Kind != parentKind {
+			continue
+		}
+		if string(owner.UID) != "" && parentUID != "" {
+			if string(owner.UID) == parentUID {
+				return true
+			}
+			continue
+		}
+		if owner.Name == parent.GetName() {
+			return true
+		}
+	}
+	return false
 }
 
 // NewMetadata creates a k8s node base metadata struct

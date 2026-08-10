@@ -49,7 +49,7 @@ func newReplicaSetProbe(client interface{}, g *graph.Graph) Subprobe {
 func replicaSetPodAreLinked(a, b interface{}) bool {
 	rc := a.(*v1apps.ReplicaSet)
 	pod := b.(*v1.Pod)
-	return MatchNamespace(pod, rc) && matchLabelSelector(pod, rc.Spec.Selector)
+	return MatchNamespace(pod, rc) && controlledBy(pod, rc, "ReplicaSet")
 }
 
 func newReplicaSetPodLinker(manager string) LinkHandler {
