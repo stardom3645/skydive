@@ -285,6 +285,57 @@ type kubernetesNamespaceDetail struct {
 	ResourceQuotas                  []corev1.ResourceQuota                    `json:"resourceQuotas,omitempty"`
 	LimitRanges                     []corev1.LimitRange                       `json:"limitRanges,omitempty"`
 	Events                          []corev1.Event                            `json:"events,omitempty"`
+	Pods                            []kubernetesPodCurrentStatusSnapshot      `json:"pods,omitempty"`
+}
+
+type kubernetesPodCurrentStatusSnapshot struct {
+	UID              string    `json:"uid"`
+	Name             string    `json:"name"`
+	Namespace        string    `json:"namespace"`
+	Phase            string    `json:"phase"`
+	Reason           string    `json:"reason,omitempty"`
+	NodeName         string    `json:"nodeName,omitempty"`
+	Ready            *bool     `json:"ready,omitempty"`
+	Problem          bool      `json:"problem"`
+	CrashLoop        bool      `json:"crashLoop"`
+	CurrentOOMKilled bool      `json:"currentOOMKilled"`
+	Deleting         bool      `json:"deleting"`
+	ObservedAt       time.Time `json:"observedAt"`
+}
+
+func kubernetesPodReadyStatus(pod *corev1.Pod) *bool {
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodReady {
+			ready := condition.Status == corev1.ConditionTrue
+			return &ready
+		}
+	}
+	if len(pod.Status.ContainerStatuses) > 0 {
+		allReady := true
+		for _, status := range pod.Status.ContainerStatuses {
+			if !status.Ready {
+				allReady = false
+				break
+			}
+		}
+		if allReady {
+			return &allReady
+		}
+	}
+	return nil
+}
+
+func buildKubernetesPodCurrentStatusSnapshot(pod *corev1.Pod, observedAt time.Time) kubernetesPodCurrentStatusSnapshot {
+	classification := classifyKubernetesPod(pod)
+	problem := classification.Problem || pod.Status.Phase == corev1.PodPending || pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodUnknown || pod.Status.Reason == "Evicted"
+	return kubernetesPodCurrentStatusSnapshot{
+		UID: string(pod.UID), Name: pod.Name, Namespace: pod.Namespace,
+		Phase: string(pod.Status.Phase), Reason: pod.Status.Reason, NodeName: pod.Spec.NodeName,
+		Ready: kubernetesPodReadyStatus(pod), Problem: problem,
+		CrashLoop: classification.CrashLoop, CurrentOOMKilled: classification.OOMKilled,
+		Deleting:   pod.DeletionTimestamp != nil,
+		ObservedAt: observedAt,
+	}
 }
 
 type kubernetesNamespaceCPUConfiguration struct {
@@ -361,43 +412,67 @@ type kubernetesPodDetail struct {
 }
 
 type kubernetesEndpointDetail struct {
-	Address     string `json:"address"`
-	PodUID      string `json:"podUid,omitempty"`
-	PodName     string `json:"podName,omitempty"`
-	NodeName    string `json:"nodeName,omitempty"`
-	Ready       *bool  `json:"ready,omitempty"`
-	Serving     *bool  `json:"serving,omitempty"`
-	Terminating *bool  `json:"terminating,omitempty"`
-	Zone        string `json:"zone,omitempty"`
+	Address       string                   `json:"address"`
+	TargetKind    string                   `json:"targetKind,omitempty"`
+	TargetUID     string                   `json:"targetUid,omitempty"`
+	TargetName    string                   `json:"targetName,omitempty"`
+	PodUID        string                   `json:"podUid,omitempty"`
+	PodName       string                   `json:"podName,omitempty"`
+	NodeName      string                   `json:"nodeName,omitempty"`
+	Ready         *bool                    `json:"ready,omitempty"`
+	Serving       *bool                    `json:"serving,omitempty"`
+	Terminating   *bool                    `json:"terminating,omitempty"`
+	Zone          string                   `json:"zone,omitempty"`
+	EndpointSlice string                   `json:"endpointSliceName,omitempty"`
+	Ports         []kubernetesEndpointPort `json:"ports,omitempty"`
+}
+
+type kubernetesEndpointPort struct {
+	Name     string `json:"name,omitempty"`
+	Port     *int32 `json:"port,omitempty"`
+	Protocol string `json:"protocol,omitempty"`
 }
 
 type kubernetesServiceDetail struct {
-	ClusterID                   string                       `json:"clusterId"`
-	UID                         string                       `json:"uid"`
-	Name                        string                       `json:"name"`
-	Namespace                   string                       `json:"namespace"`
-	Type                        string                       `json:"type"`
-	ClusterIPs                  []string                     `json:"clusterIps,omitempty"`
-	ExternalIPs                 []string                     `json:"externalIps,omitempty"`
-	LoadBalancerIngress         []corev1.LoadBalancerIngress `json:"loadBalancerIngress,omitempty"`
-	Selector                    map[string]string            `json:"selector,omitempty"`
-	SessionAffinity             string                       `json:"sessionAffinity,omitempty"`
-	ExternalTrafficPolicy       string                       `json:"externalTrafficPolicy,omitempty"`
-	Ports                       []corev1.ServicePort         `json:"ports,omitempty"`
-	EndpointCount               int                          `json:"endpointCount"`
-	ReadyEndpointCount          int                          `json:"readyEndpointCount"`
-	NotReadyEndpointCount       int                          `json:"notReadyEndpointCount"`
-	ServingEndpointCount        int                          `json:"servingEndpointCount"`
-	TerminatingEndpointCount    int                          `json:"terminatingEndpointCount"`
-	Endpoints                   []kubernetesEndpointDetail   `json:"endpoints"`
-	SelectedPods                []kubernetesObjectReference  `json:"selectedPods"`
-	CreatedAt                   time.Time                    `json:"createdAt"`
-	NoReadyEndpoints            bool                         `json:"noReadyEndpoints"`
-	SingleEndpoint              bool                         `json:"singleEndpoint"`
-	SingleNodeConcentration     bool                         `json:"singleNodeConcentration"`
-	SelectorWithoutMatchingPods bool                         `json:"selectorWithoutMatchingPods"`
-	EndpointDataAvailable       bool                         `json:"endpointDataAvailable"`
-	RelationshipSource          string                       `json:"relationshipSource"`
+	ClusterID                    string                       `json:"clusterId"`
+	UID                          string                       `json:"uid"`
+	Name                         string                       `json:"name"`
+	Namespace                    string                       `json:"namespace"`
+	Type                         string                       `json:"type"`
+	ClusterIPs                   []string                     `json:"clusterIps,omitempty"`
+	ExternalIPs                  []string                     `json:"externalIps,omitempty"`
+	LoadBalancerIngress          []corev1.LoadBalancerIngress `json:"loadBalancerIngress,omitempty"`
+	Selector                     map[string]string            `json:"selector,omitempty"`
+	SessionAffinity              string                       `json:"sessionAffinity,omitempty"`
+	ExternalTrafficPolicy        string                       `json:"externalTrafficPolicy,omitempty"`
+	InternalTrafficPolicy        string                       `json:"internalTrafficPolicy,omitempty"`
+	ExternalName                 string                       `json:"externalName,omitempty"`
+	IPFamilies                   []corev1.IPFamily            `json:"ipFamilies,omitempty"`
+	IPFamilyPolicy               *corev1.IPFamilyPolicyType   `json:"ipFamilyPolicy,omitempty"`
+	PublishNotReadyAddresses     bool                         `json:"publishNotReadyAddresses"`
+	Ports                        []corev1.ServicePort         `json:"ports,omitempty"`
+	EndpointCount                int                          `json:"endpointCount"`
+	ReadyEndpointCount           int                          `json:"readyEndpointCount"`
+	NotReadyEndpointCount        int                          `json:"notReadyEndpointCount"`
+	ServingEndpointCount         int                          `json:"servingEndpointCount"`
+	TerminatingEndpointCount     int                          `json:"terminatingEndpointCount"`
+	Endpoints                    []kubernetesEndpointDetail   `json:"endpoints"`
+	SelectedPods                 []kubernetesObjectReference  `json:"selectedPods"`
+	EndpointSlices               []kubernetesObjectReference  `json:"endpointSlices"`
+	Ingresses                    []kubernetesObjectReference  `json:"ingresses"`
+	Events                       []corev1.Event               `json:"events,omitempty"`
+	Labels                       map[string]string            `json:"labels,omitempty"`
+	Annotations                  map[string]string            `json:"annotations,omitempty"`
+	CreatedAt                    time.Time                    `json:"createdAt"`
+	NoReadyEndpoints             bool                         `json:"noReadyEndpoints"`
+	SingleEndpoint               bool                         `json:"singleEndpoint"`
+	SingleNodeConcentration      bool                         `json:"singleNodeConcentration"`
+	SelectorWithoutMatchingPods  bool                         `json:"selectorWithoutMatchingPods"`
+	EndpointDataAvailable        bool                         `json:"endpointDataAvailable"`
+	PodRelationshipAvailable     bool                         `json:"podRelationshipAvailable"`
+	IngressRelationshipAvailable bool                         `json:"ingressRelationshipAvailable"`
+	EventDataAvailable           bool                         `json:"eventDataAvailable"`
+	RelationshipSource           string                       `json:"relationshipSource"`
 }
 
 func conditionTime(value metav1.Time) *time.Time {
@@ -688,6 +763,11 @@ func handleMoldKubernetesNamespaceDetail(w http.ResponseWriter, r *http.Request)
 	}
 	if podErr == nil {
 		podAggregate := aggregateKubernetesPods(pods.Items)
+		observedAt := time.Now().UTC()
+		detail.Pods = make([]kubernetesPodCurrentStatusSnapshot, 0, len(podAggregate.AllPods))
+		for i := range podAggregate.AllPods {
+			detail.Pods = append(detail.Pods, buildKubernetesPodCurrentStatusSnapshot(&podAggregate.AllPods[i], observedAt))
+		}
 		podCount, running, pending, failed, crashLoop, oomKilled := len(podAggregate.ActivePods), podAggregate.Running, podAggregate.Pending, 0, 0, podAggregate.OOMKilled
 		for i := range podAggregate.ActivePods {
 			pod := &podAggregate.ActivePods[i]
@@ -829,7 +909,22 @@ func handleMoldKubernetesServiceDetail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "service not found", http.StatusNotFound)
 		return
 	}
-	detail := kubernetesServiceDetail{ClusterID: cluster.ID, UID: string(service.UID), Name: service.Name, Namespace: service.Namespace, Type: string(service.Spec.Type), ClusterIPs: append([]string(nil), service.Spec.ClusterIPs...), ExternalIPs: append([]string(nil), service.Spec.ExternalIPs...), LoadBalancerIngress: append([]corev1.LoadBalancerIngress(nil), service.Status.LoadBalancer.Ingress...), Selector: service.Spec.Selector, SessionAffinity: string(service.Spec.SessionAffinity), ExternalTrafficPolicy: string(service.Spec.ExternalTrafficPolicy), Ports: append([]corev1.ServicePort(nil), service.Spec.Ports...), CreatedAt: service.CreationTimestamp.Time, Endpoints: make([]kubernetesEndpointDetail, 0), SelectedPods: make([]kubernetesObjectReference, 0)}
+	detail := kubernetesServiceDetail{
+		ClusterID: cluster.ID, UID: string(service.UID), Name: service.Name, Namespace: service.Namespace,
+		Type: string(service.Spec.Type), ClusterIPs: append([]string(nil), service.Spec.ClusterIPs...),
+		ExternalIPs: append([]string(nil), service.Spec.ExternalIPs...), ExternalName: service.Spec.ExternalName,
+		LoadBalancerIngress: append([]corev1.LoadBalancerIngress(nil), service.Status.LoadBalancer.Ingress...),
+		Selector:            service.Spec.Selector, SessionAffinity: string(service.Spec.SessionAffinity),
+		ExternalTrafficPolicy: string(service.Spec.ExternalTrafficPolicy), IPFamilies: append([]corev1.IPFamily(nil), service.Spec.IPFamilies...),
+		IPFamilyPolicy: service.Spec.IPFamilyPolicy, PublishNotReadyAddresses: service.Spec.PublishNotReadyAddresses,
+		Ports: append([]corev1.ServicePort(nil), service.Spec.Ports...), Labels: service.Labels, Annotations: service.Annotations,
+		CreatedAt: service.CreationTimestamp.Time, Endpoints: make([]kubernetesEndpointDetail, 0),
+		SelectedPods: make([]kubernetesObjectReference, 0), EndpointSlices: make([]kubernetesObjectReference, 0),
+		Ingresses: make([]kubernetesObjectReference, 0), Events: make([]corev1.Event, 0),
+	}
+	if service.Spec.InternalTrafficPolicy != nil {
+		detail.InternalTrafficPolicy = string(*service.Spec.InternalTrafficPolicy)
+	}
 	slices, sliceErr := client.DiscoveryV1().EndpointSlices(service.Namespace).List(ctx, metav1.ListOptions{LabelSelector: discoveryv1.LabelServiceName + "=" + service.Name})
 	nodes := make(map[string]bool)
 	podUIDs := make(map[string]bool)
@@ -837,9 +932,21 @@ func handleMoldKubernetesServiceDetail(w http.ResponseWriter, r *http.Request) {
 		detail.EndpointDataAvailable = true
 		detail.RelationshipSource = "ENDPOINT_SLICE"
 		for _, slice := range slices.Items {
+			detail.EndpointSlices = append(detail.EndpointSlices, kubernetesObjectReference{UID: string(slice.UID), Kind: "EndpointSlice", Name: slice.Name, Namespace: slice.Namespace})
+			ports := make([]kubernetesEndpointPort, 0, len(slice.Ports))
+			for _, port := range slice.Ports {
+				item := kubernetesEndpointPort{Port: port.Port}
+				if port.Name != nil {
+					item.Name = *port.Name
+				}
+				if port.Protocol != nil {
+					item.Protocol = string(*port.Protocol)
+				}
+				ports = append(ports, item)
+			}
 			for _, endpoint := range slice.Endpoints {
 				for _, address := range endpoint.Addresses {
-					item := kubernetesEndpointDetail{Address: address, Ready: endpoint.Conditions.Ready, Serving: endpoint.Conditions.Serving, Terminating: endpoint.Conditions.Terminating}
+					item := kubernetesEndpointDetail{Address: address, Ready: endpoint.Conditions.Ready, Serving: endpoint.Conditions.Serving, Terminating: endpoint.Conditions.Terminating, EndpointSlice: slice.Name, Ports: ports}
 					if endpoint.NodeName != nil {
 						item.NodeName = *endpoint.NodeName
 						nodes[item.NodeName] = true
@@ -847,10 +954,15 @@ func handleMoldKubernetesServiceDetail(w http.ResponseWriter, r *http.Request) {
 					if endpoint.Zone != nil {
 						item.Zone = *endpoint.Zone
 					}
-					if endpoint.TargetRef != nil && endpoint.TargetRef.Kind == "Pod" {
-						item.PodUID = string(endpoint.TargetRef.UID)
-						item.PodName = endpoint.TargetRef.Name
-						podUIDs[item.PodUID] = true
+					if endpoint.TargetRef != nil {
+						item.TargetKind = endpoint.TargetRef.Kind
+						item.TargetUID = string(endpoint.TargetRef.UID)
+						item.TargetName = endpoint.TargetRef.Name
+						if endpoint.TargetRef.Kind == "Pod" {
+							item.PodUID = item.TargetUID
+							item.PodName = item.TargetName
+							podUIDs[item.PodUID] = true
+						}
 					}
 					detail.Endpoints = append(detail.Endpoints, item)
 					detail.EndpointCount++
@@ -869,24 +981,128 @@ func handleMoldKubernetesServiceDetail(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if sliceErr != nil || len(slices.Items) == 0 {
+		legacyEndpoints, endpointErr := client.CoreV1().Endpoints(service.Namespace).Get(ctx, service.Name, metav1.GetOptions{})
+		if endpointErr == nil {
+			detail.EndpointDataAvailable = true
+			detail.RelationshipSource = "ENDPOINT"
+			appendAddress := func(address corev1.EndpointAddress, ready bool, ports []corev1.EndpointPort) {
+				portDetails := make([]kubernetesEndpointPort, 0, len(ports))
+				for _, port := range ports {
+					portNumber := port.Port
+					portDetails = append(portDetails, kubernetesEndpointPort{Name: port.Name, Port: &portNumber, Protocol: string(port.Protocol)})
+				}
+				readyValue := ready
+				item := kubernetesEndpointDetail{Address: address.IP, Ready: &readyValue, Ports: portDetails}
+				if address.NodeName != nil {
+					item.NodeName = *address.NodeName
+					nodes[item.NodeName] = true
+				}
+				if address.TargetRef != nil {
+					item.TargetKind = address.TargetRef.Kind
+					item.TargetUID = string(address.TargetRef.UID)
+					item.TargetName = address.TargetRef.Name
+					if address.TargetRef.Kind == "Pod" {
+						item.PodUID = item.TargetUID
+						item.PodName = item.TargetName
+						podUIDs[item.PodUID] = true
+					}
+				}
+				detail.Endpoints = append(detail.Endpoints, item)
+				detail.EndpointCount++
+				if ready {
+					detail.ReadyEndpointCount++
+				} else {
+					detail.NotReadyEndpointCount++
+				}
+			}
+			for _, subset := range legacyEndpoints.Subsets {
+				for _, address := range subset.Addresses {
+					appendAddress(address, true, subset.Ports)
+				}
+				for _, address := range subset.NotReadyAddresses {
+					appendAddress(address, false, subset.Ports)
+				}
+			}
+		} else if apierrors.IsNotFound(endpointErr) && sliceErr == nil {
+			// Both discovery queries completed successfully and no endpoint object
+			// exists. This is a collected empty relationship, not a query failure.
+			detail.EndpointDataAvailable = true
+		}
+	}
 	if len(podUIDs) > 0 {
 		pods, podErr := client.CoreV1().Pods(service.Namespace).List(ctx, metav1.ListOptions{})
 		if podErr == nil {
+			detail.PodRelationshipAvailable = true
 			for _, pod := range pods.Items {
 				if podUIDs[string(pod.UID)] {
 					detail.SelectedPods = append(detail.SelectedPods, kubernetesObjectReference{UID: string(pod.UID), Kind: "Pod", Name: pod.Name, Namespace: pod.Namespace})
 				}
 			}
 		}
-	} else if (sliceErr != nil || len(slices.Items) == 0) && len(service.Spec.Selector) > 0 {
+	} else if len(service.Spec.Selector) > 0 {
 		pods, podErr := client.CoreV1().Pods(service.Namespace).List(ctx, metav1.ListOptions{})
 		if podErr == nil {
-			detail.RelationshipSource = "SELECTOR"
+			detail.PodRelationshipAvailable = true
+			if detail.EndpointDataAvailable {
+				detail.RelationshipSource = "ENDPOINT_SELECTOR"
+			} else {
+				detail.RelationshipSource = "SELECTOR"
+			}
 			for _, pod := range pods.Items {
 				if labelsMatch(service.Spec.Selector, pod.Labels) {
 					detail.SelectedPods = append(detail.SelectedPods, kubernetesObjectReference{UID: string(pod.UID), Kind: "Pod", Name: pod.Name, Namespace: pod.Namespace})
 					nodes[pod.Spec.NodeName] = true
 				}
+			}
+		}
+	} else if sliceErr == nil {
+		// A selector-less Service backed by direct EndpointSlice addresses has no
+		// Pod relationship by design. Successful EndpointSlice collection is
+		// sufficient to distinguish that state from a failed relationship query.
+		detail.PodRelationshipAvailable = true
+	}
+	ingresses, ingressErr := client.NetworkingV1().Ingresses(service.Namespace).List(ctx, metav1.ListOptions{})
+	if ingressErr == nil {
+		detail.IngressRelationshipAvailable = true
+		usesService := func(backendName string) bool { return backendName == service.Name }
+		for i := range ingresses.Items {
+			ingress := &ingresses.Items[i]
+			matched := ingress.Spec.DefaultBackend != nil && ingress.Spec.DefaultBackend.Service != nil && usesService(ingress.Spec.DefaultBackend.Service.Name)
+			if !matched {
+				for _, rule := range ingress.Spec.Rules {
+					if rule.HTTP == nil {
+						continue
+					}
+					for _, path := range rule.HTTP.Paths {
+						if path.Backend.Service != nil && usesService(path.Backend.Service.Name) {
+							matched = true
+							break
+						}
+					}
+					if matched {
+						break
+					}
+				}
+			}
+			if matched {
+				detail.Ingresses = append(detail.Ingresses, kubernetesObjectReference{UID: string(ingress.UID), Kind: "Ingress", Name: ingress.Name, Namespace: ingress.Namespace})
+			}
+		}
+	}
+	relatedUIDs := map[string]bool{string(service.UID): true}
+	for _, pod := range detail.SelectedPods {
+		relatedUIDs[pod.UID] = true
+	}
+	for _, ingress := range detail.Ingresses {
+		relatedUIDs[ingress.UID] = true
+	}
+	if events, eventErr := client.CoreV1().Events(service.Namespace).List(ctx, metav1.ListOptions{}); eventErr == nil {
+		detail.EventDataAvailable = true
+		for i := range events.Items {
+			event := events.Items[i]
+			if relatedUIDs[string(event.InvolvedObject.UID)] {
+				detail.Events = append(detail.Events, event)
 			}
 		}
 	}

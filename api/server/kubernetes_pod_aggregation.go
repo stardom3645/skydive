@@ -60,7 +60,7 @@ type kubernetesPodAggregate struct {
 func classifyKubernetesPod(pod *corev1.Pod) kubernetesPodClassification {
 	deleting := pod.DeletionTimestamp != nil
 	terminalReason := pod.Status.Reason == "Evicted" || pod.Status.Reason == "Completed"
-	active := !deleting && !terminalReason && (pod.Status.Phase == corev1.PodPending || pod.Status.Phase == corev1.PodRunning)
+	active := !deleting && !terminalReason && (pod.Status.Phase == corev1.PodPending || pod.Status.Phase == corev1.PodRunning || pod.Status.Phase == corev1.PodUnknown)
 	result := kubernetesPodClassification{
 		Active:     active,
 		Running:    active && pod.Status.Phase == corev1.PodRunning,
@@ -73,7 +73,7 @@ func classifyKubernetesPod(pod *corev1.Pod) kubernetesPodClassification {
 	}
 
 	for _, condition := range pod.Status.Conditions {
-		if condition.Type == corev1.PodReady && condition.Status != corev1.ConditionTrue {
+		if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionFalse {
 			result.Problem = true
 			break
 		}
@@ -91,8 +91,7 @@ func classifyKubernetesPod(pod *corev1.Pod) kubernetesPodClassification {
 				result.CrashLoop = true
 			}
 		}
-		if (status.State.Terminated != nil && status.State.Terminated.Reason == "OOMKilled") ||
-			(status.LastTerminationState.Terminated != nil && status.LastTerminationState.Terminated.Reason == "OOMKilled") {
+		if status.State.Terminated != nil && status.State.Terminated.Reason == "OOMKilled" {
 			result.OOMKilled = true
 			result.Problem = true
 		}

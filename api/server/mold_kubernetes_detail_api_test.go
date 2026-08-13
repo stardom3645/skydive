@@ -70,14 +70,38 @@ func TestBuildKubernetesPodDetailDoesNotExposeEnvironmentOrSecretValues(t *testi
 	}
 }
 
-func TestPodProblemStateDetectsRestartAndOOMKilled(t *testing.T) {
+func TestPodProblemStateKeepsPastOOMKilledOutOfCurrentProblem(t *testing.T) {
 	pod := &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
-		Name: "app", RestartCount: 2,
+		Name: "app", Ready: true, RestartCount: 2,
 		LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Reason: "OOMKilled"}},
 	}}}}
 	problem, restarted, oom := podProblemState(pod)
-	if !problem || !restarted || !oom {
-		t.Fatalf("expected problem/restarted/oom to be true, got %v/%v/%v", problem, restarted, oom)
+	if problem || !restarted || oom {
+		t.Fatalf("expected current problem/restarted/current OOM to be false/true/false, got %v/%v/%v", problem, restarted, oom)
+	}
+}
+
+func TestKubernetesPodCurrentStatusSnapshotPrefersCurrentReadyState(t *testing.T) {
+	observedAt := metav1.Now().Time
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{UID: types.UID("dashboard-pod"), Name: "kubernetes-dashboard", Namespace: "kubernetes-dashboard"},
+		Spec:       corev1.PodSpec{NodeName: "worker-1"},
+		Status: corev1.PodStatus{
+			Phase:      corev1.PodRunning,
+			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+			InitContainerStatuses: []corev1.ContainerStatus{{
+				Name: "init", Ready: false,
+				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Reason: "Completed", ExitCode: 0}},
+			}},
+			ContainerStatuses: []corev1.ContainerStatus{{Name: "app", Ready: true, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}},
+		},
+	}
+	snapshot := buildKubernetesPodCurrentStatusSnapshot(pod, observedAt)
+	if snapshot.Ready == nil || !*snapshot.Ready || snapshot.Problem {
+		t.Fatalf("snapshot ready/problem = %v/%v, want true/false", snapshot.Ready, snapshot.Problem)
+	}
+	if snapshot.ObservedAt != observedAt {
+		t.Fatalf("observedAt = %v, want %v", snapshot.ObservedAt, observedAt)
 	}
 }
 
