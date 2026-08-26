@@ -64,6 +64,11 @@ func listInfrastructureAgentHosts() ([]moldHostDetail, error) {
 	body, _, err := requestMoldAPI(moldHostListCommand, []apiParam{
 		{Key: "command", Value: moldHostListCommand},
 		{Key: "response", Value: "json"},
+		// CloudStack listHosts also exposes ConsoleProxy and
+		// SecondaryStorageVM hosts. Netdive Agent is installed on the routing
+		// hypervisor hosts, so constrain the source query before presenting or
+		// executing restart targets.
+		{Key: "type", Value: "Routing"},
 	})
 	if err != nil {
 		return nil, err
@@ -72,10 +77,38 @@ func listInfrastructureAgentHosts() ([]moldHostDetail, error) {
 	if err != nil {
 		return nil, err
 	}
+	hosts = filterInfrastructureAgentHosts(hosts)
 	sort.SliceStable(hosts, func(i, j int) bool {
 		return strings.ToLower(hosts[i].Name) < strings.ToLower(hosts[j].Name)
 	})
 	return hosts, nil
+}
+
+func filterInfrastructureAgentHosts(hosts []moldHostDetail) []moldHostDetail {
+	filtered := make([]moldHostDetail, 0, len(hosts))
+	seen := make(map[string]struct{}, len(hosts))
+	for _, host := range hosts {
+		hostType := strings.ToLower(strings.TrimSpace(host.Type))
+		if hostType != "routing" {
+			// Some older Mold responses omit type even when type=Routing was
+			// requested. Accept only records that still have routing-host
+			// characteristics; never infer eligibility from VM-like names.
+			hypervisor := strings.ToLower(strings.TrimSpace(host.Hypervisor))
+			if hostType != "" || hypervisor == "" || hypervisor == "none" || strings.TrimSpace(host.ClusterID) == "" {
+				continue
+			}
+		}
+		if strings.TrimSpace(host.ManagementIP) == "" {
+			continue
+		}
+		identity := strings.ToLower(firstNonEmptyString(host.UUID, host.ID, host.ManagementIP))
+		if _, exists := seen[identity]; exists {
+			continue
+		}
+		seen[identity] = struct{}{}
+		filtered = append(filtered, host)
+	}
+	return filtered
 }
 
 func selectInfrastructureAgentHosts(hosts []moldHostDetail, requestedIDs []string) ([]moldHostDetail, error) {

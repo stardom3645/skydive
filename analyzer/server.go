@@ -118,7 +118,7 @@ func startMoldKubernetesProbe(g *graph.Graph, probeBundle *probe.Bundle) func() 
 		if k8s.ShouldSkipK8sProbe() {
 			return fmt.Errorf("Kubernetes collection is not ready: kubeconfig or selection state is missing")
 		}
-		handler, err := k8s.NewK8sProbe(g)
+		handler, err := k8s.NewMoldManagedK8sProbe(g, api.MoldKubernetesClusterRuntimeStates)
 		if err != nil {
 			logging.GetLogger().Errorf("Failed to create Mold Kubernetes probe: %s", err)
 			return err

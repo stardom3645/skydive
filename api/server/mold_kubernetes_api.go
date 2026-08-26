@@ -903,6 +903,39 @@ func listMoldKubernetesClusters() ([]moldKubernetesCluster, error) {
 	return parseMoldKubernetesClusters(body)
 }
 
+// MoldKubernetesClusterRuntimeStates exposes only the Mold lifecycle state
+// needed by the topology probe supervisor. Stopped clusters are intentionally
+// treated as inactive: any detail informer already watching them is stopped so
+// client-go does not keep retrying an API server that Mold has shut down.
+func MoldKubernetesClusterRuntimeStates() (map[string]string, error) {
+	clusters, err := listMoldKubernetesClusters()
+	if err != nil {
+		return nil, err
+	}
+	states := make(map[string]string, len(clusters))
+	for _, cluster := range clusters {
+		states[cluster.ID] = cluster.State
+		if isStoppedMoldKubernetesState(cluster.State) {
+			pauseKubernetesClient(cluster.ID)
+			setKubernetesCollectionState(cluster.ID, kubernetesInactive, nil)
+		}
+	}
+	return states, nil
+}
+
+func isStoppedMoldKubernetesState(state string) bool {
+	return strings.EqualFold(strings.TrimSpace(state), "stopped")
+}
+
+func isTransitioningMoldKubernetesState(state string) bool {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "starting", "stopping":
+		return true
+	default:
+		return false
+	}
+}
+
 func getMoldKubernetesConfig(clusterID string) (string, error) {
 	body, _, err := requestMoldAPI(moldKubernetesConfigCommand, []apiParam{
 		{Key: "command", Value: moldKubernetesConfigCommand},

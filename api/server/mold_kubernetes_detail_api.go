@@ -30,6 +30,7 @@ const (
 	kubernetesSyncing              kubernetesAPIConnectionStatus = "SYNCING"
 	kubernetesHealthy              kubernetesAPIConnectionStatus = "HEALTHY"
 	kubernetesDelayed              kubernetesAPIConnectionStatus = "DELAYED"
+	kubernetesInactive             kubernetesAPIConnectionStatus = "INACTIVE"
 	kubernetesDisconnected         kubernetesAPIConnectionStatus = "DISCONNECTED"
 	kubernetesAuthenticationFailed kubernetesAPIConnectionStatus = "AUTHENTICATION_FAILED"
 	kubernetesPermissionDenied     kubernetesAPIConnectionStatus = "PERMISSION_DENIED"
@@ -55,6 +56,17 @@ var kubernetesClientRegistry = struct {
 }{clients: make(map[string]cachedKubernetesClient), states: make(map[string]kubernetesCollectionState)}
 
 func getMoldKubernetesClient(cluster moldKubernetesCluster) (kubernetes.Interface, *rest.Config, error) {
+	if isStoppedMoldKubernetesState(cluster.State) {
+		pauseKubernetesClient(cluster.ID)
+		setKubernetesCollectionState(cluster.ID, kubernetesInactive, nil)
+		return nil, nil, newVMConsoleAPIError(http.StatusConflict, "정지된 Kubernetes 클러스터는 수집하지 않습니다.", nil)
+	}
+	if isTransitioningMoldKubernetesState(cluster.State) {
+		pauseKubernetesClient(cluster.ID)
+		setKubernetesCollectionState(cluster.ID, kubernetesSyncing, nil)
+		return nil, nil, newVMConsoleAPIError(http.StatusConflict, "Kubernetes 클러스터 상태 전환이 완료된 후 수집을 재개합니다.", nil)
+	}
+
 	now := time.Now().UTC()
 	kubernetesClientRegistry.RLock()
 	cached, ok := kubernetesClientRegistry.clients[cluster.ID]
@@ -82,8 +94,13 @@ func getMoldKubernetesClient(cluster moldKubernetesCluster) (kubernetes.Interfac
 		setKubernetesCollectionState(cluster.ID, classifyKubernetesConnectionError(err), err)
 		return nil, nil, newVMConsoleAPIError(http.StatusBadGateway, "Kubernetes client를 생성하지 못했습니다.", err)
 	}
+	watchClientset, err := kubernetes.NewForConfig(kubernetesListWatchConfig(clientConfig))
+	if err != nil {
+		setKubernetesCollectionState(cluster.ID, classifyKubernetesConnectionError(err), err)
+		return nil, nil, newVMConsoleAPIError(http.StatusBadGateway, "Kubernetes watch client를 생성하지 못했습니다.", err)
+	}
 	stopCh := make(chan struct{})
-	startKubernetesListWatch(cluster.ID, clientset, stopCh)
+	startKubernetesListWatch(cluster.ID, watchClientset, stopCh)
 
 	kubernetesClientRegistry.Lock()
 	if previous, exists := kubernetesClientRegistry.clients[cluster.ID]; exists && previous.stopCh != nil {
@@ -93,6 +110,16 @@ func getMoldKubernetesClient(cluster moldKubernetesCluster) (kubernetes.Interfac
 	kubernetesClientRegistry.Unlock()
 	setKubernetesCollectionState(cluster.ID, kubernetesConnected, nil)
 	return clientset, clientConfig, nil
+}
+
+// kubernetesListWatchConfig separates long-running informer watches from the
+// bounded client used by detail API requests. A non-zero rest.Config timeout
+// applies to the entire watch request and forces client-go reflectors into a
+// continuous reconnect/re-list loop.
+func kubernetesListWatchConfig(clientConfig *rest.Config) *rest.Config {
+	watchConfig := rest.CopyConfig(clientConfig)
+	watchConfig.Timeout = 0
+	return watchConfig
 }
 
 func startKubernetesListWatch(clusterID string, client kubernetes.Interface, stopCh chan struct{}) {
@@ -151,6 +178,15 @@ func getKubernetesCollectionState(clusterID string) kubernetesCollectionState {
 }
 
 func stopKubernetesClient(clusterID string) {
+	pauseKubernetesClient(clusterID)
+	kubernetesClientRegistry.Lock()
+	delete(kubernetesClientRegistry.states, clusterID)
+	kubernetesClientRegistry.Unlock()
+}
+
+// pauseKubernetesClient stops informer traffic while retaining the last
+// collection timestamp/status snapshot for an inactive Mold cluster.
+func pauseKubernetesClient(clusterID string) {
 	kubernetesClientRegistry.Lock()
 	if cached, ok := kubernetesClientRegistry.clients[clusterID]; ok {
 		if cached.stopCh != nil {
@@ -158,7 +194,6 @@ func stopKubernetesClient(clusterID string) {
 		}
 		delete(kubernetesClientRegistry.clients, clusterID)
 	}
-	delete(kubernetesClientRegistry.states, clusterID)
 	kubernetesClientRegistry.Unlock()
 }
 

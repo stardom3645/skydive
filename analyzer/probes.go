@@ -18,6 +18,7 @@
 package analyzer
 
 import (
+	api "github.com/skydive-project/skydive/api/server"
 	"github.com/skydive-project/skydive/config"
 	fp "github.com/skydive-project/skydive/flow/probes"
 	"github.com/skydive-project/skydive/graffiti/graph"
@@ -125,7 +126,7 @@ func NewTopologyProbeBundleFromConfig(g *graph.Graph) (*probe.Bundle, error) {
 			if k8s.ShouldSkipK8sProbe() {
 				continue
 			}
-			handler, err = k8s.NewK8sProbe(g)
+			handler, err = k8s.NewMoldManagedK8sProbe(g, api.MoldKubernetesClusterRuntimeStates)
 		case "istio":
 			handler, err = istio.NewIstioProbe(g)
 		case "nsm":

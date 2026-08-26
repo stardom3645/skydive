@@ -36,6 +36,11 @@ type clusterCache struct {
 func (c *clusterCache) addClusterNode() error {
 	c.graph.Lock()
 	defer c.graph.Unlock()
+	for _, existing := range c.graph.GetNodes(graph.Metadata{"Type": Cluster, ClusterNameField: c.clusterName}) {
+		c.node = existing
+		logging.GetLogger().Infof("Reusing cluster{Name: %s}", c.clusterName)
+		return nil
+	}
 
 	m := graph.Metadata{"Name": c.clusterName}
 

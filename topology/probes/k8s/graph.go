@@ -153,7 +153,8 @@ func CleanupK8sGraph(g *graph.Graph) {
 	g.Lock()
 	defer g.Unlock()
 
-	filter := graph.NewElementFilter(filters.NewTermStringFilter("Manager", Manager))
+	managerPattern, _ := filters.NewRegexFilter("Manager", "^"+Manager+"(?:#.*)?$")
+	filter := graph.NewElementFilter(&filters.Filter{RegexFilter: managerPattern})
 	if err := g.DelNodes(filter); err != nil {
 		logging.GetLogger().Errorf("Failed to cleanup Kubernetes graph nodes: %s", err)
 	}

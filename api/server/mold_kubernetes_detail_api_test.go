@@ -5,12 +5,55 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/rest"
 )
+
+func TestKubernetesListWatchConfigDisablesOnlyRequestTimeout(t *testing.T) {
+	source := &rest.Config{
+		Host:    "https://kubernetes.example.test",
+		Timeout: 15 * time.Second,
+		QPS:     20,
+		Burst:   40,
+	}
+
+	watch := kubernetesListWatchConfig(source)
+	if watch == source {
+		t.Fatal("watch config must be a copy so detail request settings remain isolated")
+	}
+	if watch.Timeout != 0 {
+		t.Fatalf("watch timeout=%s, want 0 for long-running informer watches", watch.Timeout)
+	}
+	if source.Timeout != 15*time.Second {
+		t.Fatalf("source timeout=%s, want detail API timeout to remain 15s", source.Timeout)
+	}
+	if watch.Host != source.Host || watch.QPS != source.QPS || watch.Burst != source.Burst {
+		t.Fatalf("watch config lost shared connection settings: %#v", watch)
+	}
+}
+
+func TestMoldKubernetesInactiveLifecycleClassification(t *testing.T) {
+	for _, state := range []string{"Stopped", " stopped ", "STOPPED"} {
+		if !isStoppedMoldKubernetesState(state) {
+			t.Fatalf("state %q must be inactive", state)
+		}
+	}
+	for _, state := range []string{"Starting", "Stopping"} {
+		if !isTransitioningMoldKubernetesState(state) {
+			t.Fatalf("state %q must be transitional", state)
+		}
+	}
+	for _, state := range []string{"Running", "Failed", "Error", ""} {
+		if isStoppedMoldKubernetesState(state) || isTransitioningMoldKubernetesState(state) {
+			t.Fatalf("state %q must retain normal problem/unknown handling", state)
+		}
+	}
+}
 
 func TestKubernetesNamespaceResourcesUsesOneActivePodContainerDataset(t *testing.T) {
 	pods := []corev1.Pod{{Spec: corev1.PodSpec{

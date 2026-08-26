@@ -226,6 +226,19 @@ func (c *ResourceCache) OnAdd(obj interface{}) {
 		metadata.SetField(ClusterNameField, c.clusterName)
 	}
 
+	if node := c.graph.GetNode(id); node != nil {
+		// An inactive Mold cluster keeps its last graph snapshot. When it is
+		// started again, the first informer LIST is delivered as Add events;
+		// update those retained nodes instead of treating them as duplicates.
+		if err := c.graph.SetMetadata(node, metadata); err != nil {
+			logging.GetLogger().Error(err)
+			return
+		}
+		c.NotifyEvent(graph.NodeUpdated, node)
+		logging.GetLogger().Debugf("Refreshed %s", c.handler.Dump(obj))
+		return
+	}
+
 	node, err := c.graph.NewNode(id, metadata)
 	if err != nil {
 		logging.GetLogger().Error(err)
