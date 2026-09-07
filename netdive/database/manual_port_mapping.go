@@ -23,18 +23,21 @@ var (
 )
 
 // ManualPortMapping is a persisted administrator-supplied physical relation.
-// Node IDs are authoritative; names are snapshots used only for display.
+// Switch/host/NIC node IDs refer to collected topology. SwitchPortName is the
+// administrator's authoritative free-form value; SwitchPortNodeID is optional
+// legacy context because an uncollected port has no topology node.
 type ManualPortMapping struct {
 	ID               int64  `json:"id"`
 	SwitchNodeID     string `json:"switchNodeId"`
 	SwitchName       string `json:"switchName,omitempty"`
-	SwitchPortNodeID string `json:"switchPortNodeId"`
+	SwitchPortNodeID string `json:"switchPortNodeId,omitempty"`
 	SwitchPortName   string `json:"switchPortName,omitempty"`
 	HostNodeID       string `json:"hostNodeId"`
 	HostName         string `json:"hostName,omitempty"`
 	HostNICNodeID    string `json:"hostNicNodeId"`
 	HostNICName      string `json:"hostNicName,omitempty"`
 	Enabled          bool   `json:"enabled"`
+	DisabledReason   string `json:"disabledReason,omitempty"`
 	CreatedAt        string `json:"createdAt"`
 	UpdatedAt        string `json:"updatedAt"`
 }
@@ -51,7 +54,7 @@ type ManualPortMappingFilter struct {
 // ListManualPortMappings returns mappings matching all supplied filters.
 func (d *Database) ListManualPortMappings(ctx context.Context, filter ManualPortMappingFilter) ([]ManualPortMapping, error) {
 	query := `SELECT id, switch_node_id, switch_name, switch_port_node_id, switch_port_name,
-		host_node_id, host_name, host_nic_node_id, host_nic_name, enabled, created_at, updated_at
+		host_node_id, host_name, host_nic_node_id, host_nic_name, enabled, disabled_reason, created_at, updated_at
 		FROM manual_port_mapping WHERE 1 = 1`
 	args := make([]interface{}, 0, 4)
 	if !filter.IncludeDisabled {
@@ -93,7 +96,7 @@ func (d *Database) ListManualPortMappings(ctx context.Context, filter ManualPort
 // GetManualPortMapping returns one mapping by database ID.
 func (d *Database) GetManualPortMapping(ctx context.Context, id int64) (ManualPortMapping, error) {
 	row := d.db.QueryRowContext(ctx, `SELECT id, switch_node_id, switch_name, switch_port_node_id, switch_port_name,
-		host_node_id, host_name, host_nic_node_id, host_nic_name, enabled, created_at, updated_at
+		host_node_id, host_name, host_nic_node_id, host_nic_name, enabled, disabled_reason, created_at, updated_at
 		FROM manual_port_mapping WHERE id = ?`, id)
 	mapping, err := scanManualPortMapping(row)
 	if err == sql.ErrNoRows {
@@ -112,7 +115,7 @@ func (d *Database) CreateManualPortMapping(ctx context.Context, mapping ManualPo
 		switch_node_id, switch_name, switch_port_node_id, switch_port_name,
 		host_node_id, host_name, host_nic_node_id, host_nic_name, enabled
 	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		mapping.SwitchNodeID, mapping.SwitchName, mapping.SwitchPortNodeID, mapping.SwitchPortName,
+		mapping.SwitchNodeID, mapping.SwitchName, nullableText(mapping.SwitchPortNodeID), strings.TrimSpace(mapping.SwitchPortName),
 		mapping.HostNodeID, mapping.HostName, mapping.HostNICNodeID, mapping.HostNICName, boolInt(mapping.Enabled))
 	if err != nil {
 		return ManualPortMapping{}, manualPortMappingWriteError("create", err)
@@ -130,11 +133,12 @@ func (d *Database) UpdateManualPortMapping(ctx context.Context, mapping ManualPo
 	result, err := d.db.ExecContext(ctx, `UPDATE manual_port_mapping SET
 		switch_node_id = ?, switch_name = ?, switch_port_node_id = ?, switch_port_name = ?,
 		host_node_id = ?, host_name = ?, host_nic_node_id = ?, host_nic_name = ?, enabled = ?,
+		disabled_reason = CASE WHEN ? = 1 THEN NULL ELSE disabled_reason END,
 		updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 		WHERE id = ?`,
-		mapping.SwitchNodeID, mapping.SwitchName, mapping.SwitchPortNodeID, mapping.SwitchPortName,
+		mapping.SwitchNodeID, mapping.SwitchName, nullableText(mapping.SwitchPortNodeID), strings.TrimSpace(mapping.SwitchPortName),
 		mapping.HostNodeID, mapping.HostName, mapping.HostNICNodeID, mapping.HostNICName,
-		boolInt(mapping.Enabled), mapping.ID)
+		boolInt(mapping.Enabled), boolInt(mapping.Enabled), mapping.ID)
 	if err != nil {
 		return ManualPortMapping{}, manualPortMappingWriteError("update", err)
 	}
@@ -152,13 +156,39 @@ func (d *Database) UpdateManualPortMapping(ctx context.Context, mapping ManualPo
 // administrator history or allowing LLDP changes to erase manual decisions.
 func (d *Database) DisableManualPortMapping(ctx context.Context, id int64) error {
 	result, err := d.db.ExecContext(ctx, `UPDATE manual_port_mapping
-		SET enabled = 0, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?`, id)
+		SET enabled = 0, disabled_reason = 'user', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+		WHERE id = ? AND enabled = 1`, id)
 	if err != nil {
 		return fmt.Errorf("disable manual port mapping: %w", err)
 	}
 	affected, err := result.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("read disabled manual port mapping count: %w", err)
+	}
+	if affected == 0 {
+		var exists int
+		if err := d.db.QueryRowContext(ctx, "SELECT 1 FROM manual_port_mapping WHERE id = ?", id).Scan(&exists); err == sql.ErrNoRows {
+			return ErrManualPortMappingNotFound
+		} else if err != nil {
+			return fmt.Errorf("check disabled manual port mapping: %w", err)
+		}
+	}
+	return nil
+}
+
+// SupersedeManualPortMappingByLLDP keeps the administrator record as history
+// while releasing its active port/NIC uniqueness reservations.
+func (d *Database) SupersedeManualPortMappingByLLDP(ctx context.Context, id int64) error {
+	result, err := d.db.ExecContext(ctx, `UPDATE manual_port_mapping
+		SET enabled = 0, disabled_reason = 'lldp_auto',
+		updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+		WHERE id = ? AND enabled = 1`, id)
+	if err != nil {
+		return fmt.Errorf("supersede manual port mapping by LLDP: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read superseded manual port mapping count: %w", err)
 	}
 	if affected == 0 {
 		return ErrManualPortMappingNotFound
@@ -173,15 +203,26 @@ type rowScanner interface {
 func scanManualPortMapping(row rowScanner) (ManualPortMapping, error) {
 	var mapping ManualPortMapping
 	var enabled int
+	var switchPortNodeID sql.NullString
+	var disabledReason sql.NullString
 	err := row.Scan(
 		&mapping.ID, &mapping.SwitchNodeID, &mapping.SwitchName,
-		&mapping.SwitchPortNodeID, &mapping.SwitchPortName,
+		&switchPortNodeID, &mapping.SwitchPortName,
 		&mapping.HostNodeID, &mapping.HostName,
 		&mapping.HostNICNodeID, &mapping.HostNICName,
-		&enabled, &mapping.CreatedAt, &mapping.UpdatedAt,
+		&enabled, &disabledReason, &mapping.CreatedAt, &mapping.UpdatedAt,
 	)
+	mapping.SwitchPortNodeID = switchPortNodeID.String
+	mapping.DisabledReason = disabledReason.String
 	mapping.Enabled = enabled != 0
 	return mapping, err
+}
+
+func nullableText(value string) interface{} {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return value
 }
 
 func boolInt(value bool) int {

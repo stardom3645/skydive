@@ -91,7 +91,7 @@ func authenticatedManualPortMappingRequest(method, target string, body interface
 func TestManualPortMappingAPICRUD(t *testing.T) {
 	fixture := newManualPortMappingAPIFixture(t)
 	body := manualPortMappingRequest{
-		SwitchNodeID: "switch-1", SwitchPortNodeID: "port-1",
+		SwitchNodeID: "switch-1", SwitchPortName: "  xg7  ",
 		HostNodeID: "host-1", HostNICNodeID: "nic-1",
 	}
 
@@ -104,7 +104,7 @@ func TestManualPortMappingAPICRUD(t *testing.T) {
 	if err := json.Unmarshal(createRecorder.Body.Bytes(), &created); err != nil {
 		t.Fatal(err)
 	}
-	if created.Mapping.ID <= 0 || created.Mapping.SwitchName != "Switch 1" || created.Mapping.HostNICName != "eno1" || !created.Mapping.Enabled {
+	if created.Mapping.ID <= 0 || created.Mapping.SwitchName != "Switch 1" || created.Mapping.SwitchPortName != "xg7" || created.Mapping.SwitchPortNodeID != "" || created.Mapping.HostNICName != "eno1" || !created.Mapping.Enabled {
 		t.Fatalf("unexpected created mapping: %+v", created.Mapping)
 	}
 
@@ -121,7 +121,7 @@ func TestManualPortMappingAPICRUD(t *testing.T) {
 		t.Fatalf("listed mappings = %+v", listed.Mappings)
 	}
 
-	body.SwitchPortNodeID = "port-2"
+	body.SwitchPortName = "1/0/7"
 	body.HostNICNodeID = "nic-2"
 	updateRequest := authenticatedManualPortMappingRequest(http.MethodPut, "/api/infrastructure/manual-port-mappings/1", body)
 	updateRequest.Request = *mux.SetURLVars(&updateRequest.Request, map[string]string{"id": "1"})
@@ -129,6 +129,13 @@ func TestManualPortMappingAPICRUD(t *testing.T) {
 	fixture.api.update(updateRecorder, updateRequest)
 	if updateRecorder.Code != http.StatusOK {
 		t.Fatalf("update status = %d, body = %s", updateRecorder.Code, updateRecorder.Body.String())
+	}
+	var updated manualPortMappingResponse
+	if err := json.Unmarshal(updateRecorder.Body.Bytes(), &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Mapping.SwitchPortName != "1/0/7" || updated.Mapping.HostNICName != "eno2" {
+		t.Fatalf("unexpected updated mapping: %+v", updated.Mapping)
 	}
 
 	deleteRequest := authenticatedManualPortMappingRequest(http.MethodDelete, "/api/infrastructure/manual-port-mappings/1", nil)
@@ -144,7 +151,7 @@ func TestManualPortMappingAPICRUD(t *testing.T) {
 		t.Fatalf("active mappings = %+v, err = %v", active, err)
 	}
 	all, err := fixture.db.ListManualPortMappings(context.Background(), netdivedb.ManualPortMappingFilter{IncludeDisabled: true})
-	if err != nil || len(all) != 1 || all[0].Enabled {
+	if err != nil || len(all) != 1 || all[0].Enabled || all[0].DisabledReason != "user" {
 		t.Fatalf("all mappings = %+v, err = %v", all, err)
 	}
 }
@@ -152,7 +159,7 @@ func TestManualPortMappingAPICRUD(t *testing.T) {
 func TestManualPortMappingAPIRejectsInvalidTopologyAndConflict(t *testing.T) {
 	fixture := newManualPortMappingAPIFixture(t)
 	body := manualPortMappingRequest{
-		SwitchNodeID: "switch-1", SwitchPortNodeID: "port-1",
+		SwitchNodeID: "switch-1", SwitchPortName: "xg7",
 		HostNodeID: "host-1", HostNICNodeID: "nic-1",
 	}
 	first := httptest.NewRecorder()
@@ -161,6 +168,7 @@ func TestManualPortMappingAPIRejectsInvalidTopologyAndConflict(t *testing.T) {
 		t.Fatalf("first create status = %d, body = %s", first.Code, first.Body.String())
 	}
 
+	body.SwitchPortName = " XG7 "
 	body.HostNICNodeID = "nic-2"
 	conflict := httptest.NewRecorder()
 	fixture.api.create(conflict, authenticatedManualPortMappingRequest(http.MethodPost, "/api/infrastructure/manual-port-mappings", body))
@@ -168,11 +176,31 @@ func TestManualPortMappingAPIRejectsInvalidTopologyAndConflict(t *testing.T) {
 		t.Fatalf("conflict status = %d, body = %s", conflict.Code, conflict.Body.String())
 	}
 
-	body.SwitchPortNodeID = "nic-2"
+	body.HostNICNodeID = "switch-1"
 	invalid := httptest.NewRecorder()
 	fixture.api.create(invalid, authenticatedManualPortMappingRequest(http.MethodPost, "/api/infrastructure/manual-port-mappings", body))
 	if invalid.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("invalid topology status = %d, body = %s", invalid.Code, invalid.Body.String())
+	}
+}
+
+func TestManualPortMappingAPIRejectsInvalidFreeFormPortName(t *testing.T) {
+	fixture := newManualPortMappingAPIFixture(t)
+	body := manualPortMappingRequest{
+		SwitchNodeID: "switch-1", SwitchPortName: "   ",
+		HostNodeID: "host-1", HostNICNodeID: "nic-1",
+	}
+	for name, wantMessage := range map[string]string{
+		"   ":                    "switchPortName",
+		strings.Repeat("x", 256): "255",
+		"xg7\ninvalid":           "제어 문자",
+	} {
+		body.SwitchPortName = name
+		recorder := httptest.NewRecorder()
+		fixture.api.create(recorder, authenticatedManualPortMappingRequest(http.MethodPost, "/api/infrastructure/manual-port-mappings", body))
+		if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), wantMessage) {
+			t.Errorf("port name %q status = %d, body = %s", name, recorder.Code, recorder.Body.String())
+		}
 	}
 }
 
@@ -185,7 +213,7 @@ func TestManualPortMappingAPIRejectsAutomaticallyMappedPort(t *testing.T) {
 	}
 
 	body := manualPortMappingRequest{
-		SwitchNodeID: "switch-1", SwitchPortNodeID: "port-1",
+		SwitchNodeID: "switch-1", SwitchPortName: " ethernet1 ",
 		HostNodeID: "host-1", HostNICNodeID: "nic-1",
 	}
 	recorder := httptest.NewRecorder()
@@ -195,6 +223,51 @@ func TestManualPortMappingAPIRejectsAutomaticallyMappedPort(t *testing.T) {
 	}
 	if !strings.Contains(recorder.Body.String(), "LLDP") {
 		t.Fatalf("automatic mapping conflict body = %s", recorder.Body.String())
+	}
+
+	body.SwitchPortName = "xg7"
+	nicRecorder := httptest.NewRecorder()
+	fixture.api.create(nicRecorder, authenticatedManualPortMappingRequest(http.MethodPost, "/api/infrastructure/manual-port-mappings", body))
+	if nicRecorder.Code != http.StatusConflict || !strings.Contains(nicRecorder.Body.String(), "NIC") {
+		t.Fatalf("automatic NIC conflict status = %d, body = %s", nicRecorder.Code, nicRecorder.Body.String())
+	}
+}
+
+func TestManualPortMappingReconcilerDisablesMappingWhenLLDPArrives(t *testing.T) {
+	fixture := newManualPortMappingAPIFixture(t)
+	body := manualPortMappingRequest{
+		SwitchNodeID: "switch-1", SwitchPortName: "Ethernet1",
+		HostNodeID: "host-1", HostNICNodeID: "nic-2",
+	}
+	recorder := httptest.NewRecorder()
+	fixture.api.create(recorder, authenticatedManualPortMappingRequest(http.MethodPost, "/api/infrastructure/manual-port-mappings", body))
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("manual create status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+
+	reconciler := &manualPortMappingReconciler{db: fixture.db, graph: fixture.graph}
+	fixture.graph.AddEventListener(reconciler)
+	t.Cleanup(func() { fixture.graph.RemoveEventListener(reconciler) })
+	port := fixture.graph.GetNode(graph.Identifier("port-1"))
+	nic := fixture.graph.GetNode(graph.Identifier("nic-1"))
+	if _, err := topology.AddLayer2Link(fixture.graph, port, nic, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	active, err := fixture.db.ListManualPortMappings(context.Background(), netdivedb.ManualPortMappingFilter{})
+	if err != nil || len(active) != 0 {
+		t.Fatalf("active mappings after LLDP = %+v, err = %v", active, err)
+	}
+	history, err := fixture.db.ListManualPortMappings(context.Background(), netdivedb.ManualPortMappingFilter{IncludeDisabled: true})
+	if err != nil || len(history) != 1 || history[0].Enabled || history[0].DisabledReason != "lldp_auto" {
+		t.Fatalf("mapping history after LLDP = %+v, err = %v", history, err)
+	}
+	if err := fixture.db.DisableManualPortMapping(context.Background(), history[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	preserved, err := fixture.db.GetManualPortMapping(context.Background(), history[0].ID)
+	if err != nil || preserved.DisabledReason != "lldp_auto" {
+		t.Fatalf("LLDP disabled reason after stale delete = %+v, err = %v", preserved, err)
 	}
 }
 

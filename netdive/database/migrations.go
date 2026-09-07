@@ -48,6 +48,59 @@ var migrations = []migration{
 		},
 		validate: validateManualPortMappingSchema,
 	},
+	{
+		version: 2,
+		name:    "allow topology-free manual switch ports",
+		statements: []string{
+			`CREATE TABLE manual_port_mapping_v2 (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				switch_node_id TEXT NOT NULL,
+				switch_name TEXT,
+				switch_port_node_id TEXT,
+				switch_port_name TEXT NOT NULL CHECK (length(trim(switch_port_name)) > 0),
+				host_node_id TEXT NOT NULL,
+				host_name TEXT,
+				host_nic_node_id TEXT NOT NULL,
+				host_nic_name TEXT,
+				enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+				created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+				updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+			)`,
+			`INSERT INTO manual_port_mapping_v2 (
+				id, switch_node_id, switch_name, switch_port_node_id, switch_port_name,
+				host_node_id, host_name, host_nic_node_id, host_nic_name, enabled, created_at, updated_at
+			) SELECT id, switch_node_id, switch_name, switch_port_node_id,
+				COALESCE(NULLIF(trim(switch_port_name), ''), switch_port_node_id),
+				host_node_id, host_name, host_nic_node_id, host_nic_name, enabled, created_at, updated_at
+				FROM manual_port_mapping`,
+			`UPDATE manual_port_mapping_v2 SET enabled = 0
+				WHERE enabled = 1 AND id NOT IN (
+					SELECT MAX(id) FROM manual_port_mapping_v2 WHERE enabled = 1
+					GROUP BY switch_node_id, switch_port_name COLLATE NOCASE
+				)`,
+			`DROP TABLE manual_port_mapping`,
+			`ALTER TABLE manual_port_mapping_v2 RENAME TO manual_port_mapping`,
+			`CREATE UNIQUE INDEX ux_manual_port_mapping_active_switch_port_name
+				ON manual_port_mapping (switch_node_id, switch_port_name COLLATE NOCASE) WHERE enabled = 1`,
+			`CREATE UNIQUE INDEX ux_manual_port_mapping_active_host_nic
+				ON manual_port_mapping (host_nic_node_id) WHERE enabled = 1`,
+			`CREATE INDEX ix_manual_port_mapping_switch
+				ON manual_port_mapping (switch_node_id, switch_port_name)`,
+			`CREATE INDEX ix_manual_port_mapping_host_nic
+				ON manual_port_mapping (host_node_id, host_nic_node_id)`,
+		},
+		validate: validateManualPortMappingSchemaV2,
+	},
+	{
+		version: 3,
+		name:    "track manual mapping disable reason",
+		statements: []string{
+			`ALTER TABLE manual_port_mapping ADD COLUMN disabled_reason TEXT`,
+			`UPDATE manual_port_mapping SET disabled_reason = 'legacy_disabled'
+				WHERE enabled = 0 AND disabled_reason IS NULL`,
+		},
+		validate: validateManualPortMappingSchemaV3,
+	},
 }
 
 func (d *Database) migrate(ctx context.Context) error {
@@ -118,12 +171,50 @@ func (d *Database) applyMigration(ctx context.Context, migration migration) erro
 }
 
 func validateManualPortMappingSchema(ctx context.Context, tx *sql.Tx) error {
+	return validateManualPortMappingSchemaVersion(ctx, tx, map[string]indexRequirement{
+		"ux_manual_port_mapping_active_switch_port": {unique: 1, partial: 1, columns: []string{"switch_port_node_id"}},
+		"ux_manual_port_mapping_active_host_nic":    {unique: 1, partial: 1, columns: []string{"host_nic_node_id"}},
+		"ix_manual_port_mapping_switch":             {columns: []string{"switch_node_id", "switch_port_node_id"}},
+		"ix_manual_port_mapping_host_nic":           {columns: []string{"host_node_id", "host_nic_node_id"}},
+	}, nil)
+}
+
+func validateManualPortMappingSchemaV2(ctx context.Context, tx *sql.Tx) error {
+	return validateManualPortMappingSchemaVersion(ctx, tx, map[string]indexRequirement{
+		"ux_manual_port_mapping_active_switch_port_name": {unique: 1, partial: 1, columns: []string{"switch_node_id", "switch_port_name"}},
+		"ux_manual_port_mapping_active_host_nic":         {unique: 1, partial: 1, columns: []string{"host_nic_node_id"}},
+		"ix_manual_port_mapping_switch":                  {columns: []string{"switch_node_id", "switch_port_name"}},
+		"ix_manual_port_mapping_host_nic":                {columns: []string{"host_node_id", "host_nic_node_id"}},
+	}, map[string]int{"switch_port_node_id": 0, "switch_port_name": 1})
+}
+
+func validateManualPortMappingSchemaV3(ctx context.Context, tx *sql.Tx) error {
+	return validateManualPortMappingSchemaVersion(ctx, tx, map[string]indexRequirement{
+		"ux_manual_port_mapping_active_switch_port_name": {unique: 1, partial: 1, columns: []string{"switch_node_id", "switch_port_name"}},
+		"ux_manual_port_mapping_active_host_nic":         {unique: 1, partial: 1, columns: []string{"host_nic_node_id"}},
+		"ix_manual_port_mapping_switch":                  {columns: []string{"switch_node_id", "switch_port_name"}},
+		"ix_manual_port_mapping_host_nic":                {columns: []string{"host_node_id", "host_nic_node_id"}},
+	}, map[string]int{"switch_port_node_id": 0, "switch_port_name": 1}, []string{"disabled_reason"})
+}
+
+type indexRequirement struct {
+	unique  int
+	partial int
+	columns []string
+}
+
+func validateManualPortMappingSchemaVersion(ctx context.Context, tx *sql.Tx, requiredIndexes map[string]indexRequirement, requiredNotNull map[string]int, additionalColumns ...[]string) error {
 	requiredColumns := map[string]bool{
 		"id": false, "switch_node_id": false, "switch_name": false,
 		"switch_port_node_id": false, "switch_port_name": false,
 		"host_node_id": false, "host_name": false,
 		"host_nic_node_id": false, "host_nic_name": false,
 		"enabled": false, "created_at": false, "updated_at": false,
+	}
+	for _, columns := range additionalColumns {
+		for _, column := range columns {
+			requiredColumns[column] = false
+		}
 	}
 	rows, err := tx.QueryContext(ctx, "PRAGMA table_info(manual_port_mapping)")
 	if err != nil {
@@ -140,6 +231,10 @@ func validateManualPortMappingSchema(ctx context.Context, tx *sql.Tx) error {
 		if _, required := requiredColumns[name]; required {
 			requiredColumns[name] = true
 		}
+		if expected, required := requiredNotNull[name]; required && notNull != expected {
+			rows.Close()
+			return fmt.Errorf("manual_port_mapping column %q has incompatible nullability", name)
+		}
 	}
 	if err := rows.Close(); err != nil {
 		return err
@@ -150,17 +245,6 @@ func validateManualPortMappingSchema(ctx context.Context, tx *sql.Tx) error {
 		}
 	}
 
-	type indexRequirement struct {
-		unique  int
-		partial int
-		columns []string
-	}
-	requiredIndexes := map[string]indexRequirement{
-		"ux_manual_port_mapping_active_switch_port": {unique: 1, partial: 1, columns: []string{"switch_port_node_id"}},
-		"ux_manual_port_mapping_active_host_nic":    {unique: 1, partial: 1, columns: []string{"host_nic_node_id"}},
-		"ix_manual_port_mapping_switch":             {columns: []string{"switch_node_id", "switch_port_node_id"}},
-		"ix_manual_port_mapping_host_nic":           {columns: []string{"host_node_id", "host_nic_node_id"}},
-	}
 	indexRows, err := tx.QueryContext(ctx, "PRAGMA index_list(manual_port_mapping)")
 	if err != nil {
 		return err

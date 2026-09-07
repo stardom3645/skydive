@@ -6,18 +6,22 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	auth "github.com/abbot/go-http-auth"
 	"github.com/gorilla/mux"
 
 	"github.com/skydive-project/skydive/graffiti/graph"
 	shttp "github.com/skydive-project/skydive/graffiti/http"
+	"github.com/skydive-project/skydive/graffiti/logging"
 	"github.com/skydive-project/skydive/graffiti/rbac"
 	netdivedb "github.com/skydive-project/skydive/netdive/database"
 	"github.com/skydive-project/skydive/topology"
@@ -25,19 +29,61 @@ import (
 
 const manualPortMappingObject = "manual-port-mapping"
 
-var errManualPortAutomaticallyMapped = errors.New("switch port already has an automatic topology relation")
+var (
+	errManualPortAutomaticallyMapped = errors.New("switch port already has an automatic topology relation")
+	errHostNICAutomaticallyMapped    = errors.New("host NIC already has an automatic topology relation")
+)
 
 type manualPortMappingAPI struct {
 	db    *netdivedb.Database
 	graph *graph.Graph
 }
 
+type manualPortMappingReconciler struct {
+	graph.DefaultGraphListener
+	db    *netdivedb.Database
+	graph *graph.Graph
+}
+
+func (r *manualPortMappingReconciler) reconcile() {
+	mappings, err := r.db.ListManualPortMappings(context.Background(), netdivedb.ManualPortMappingFilter{})
+	if err != nil {
+		logging.GetLogger().Errorf("Failed to reconcile manual port mappings with LLDP: %s", err)
+		return
+	}
+	for _, mapping := range mappings {
+		switchNode := r.graph.GetNode(graph.Identifier(mapping.SwitchNodeID))
+		hostNIC := r.graph.GetNode(graph.Identifier(mapping.HostNICNodeID))
+		portIsAutomatic := switchNode != nil && hasAutomaticPortName(r.graph, switchNode, mapping.SwitchPortName)
+		nicIsAutomatic := hostNIC != nil && hasAutomaticHostNICRelation(r.graph, hostNIC)
+		if !portIsAutomatic && !nicIsAutomatic {
+			continue
+		}
+		if err := r.db.SupersedeManualPortMappingByLLDP(context.Background(), mapping.ID); err != nil {
+			logging.GetLogger().Errorf("Failed to supersede manual port mapping %d with LLDP: %s", mapping.ID, err)
+			continue
+		}
+		logging.GetLogger().Infof("Disabled manual port mapping %d because an LLDP automatic relation is now available", mapping.ID)
+	}
+}
+
+func (r *manualPortMappingReconciler) OnEdgeAdded(edge *graph.Edge) {
+	relationType, _ := edge.GetFieldString("RelationType")
+	if !strings.EqualFold(strings.TrimSpace(relationType), topology.OwnershipLink) {
+		r.reconcile()
+	}
+}
+
+func (r *manualPortMappingReconciler) OnEdgeUpdated(edge *graph.Edge, _ []graph.PartiallyUpdatedOp) {
+	r.OnEdgeAdded(edge)
+}
+
 type manualPortMappingRequest struct {
-	SwitchNodeID     string `json:"switchNodeId"`
-	SwitchPortNodeID string `json:"switchPortNodeId"`
-	HostNodeID       string `json:"hostNodeId"`
-	HostNICNodeID    string `json:"hostNicNodeId"`
-	Enabled          *bool  `json:"enabled,omitempty"`
+	SwitchNodeID   string `json:"switchNodeId"`
+	SwitchPortName string `json:"switchPortName"`
+	HostNodeID     string `json:"hostNodeId"`
+	HostNICNodeID  string `json:"hostNicNodeId"`
+	Enabled        *bool  `json:"enabled,omitempty"`
 }
 
 type manualPortMappingsResponse struct {
@@ -157,11 +203,17 @@ func decodeManualPortMappingRequest(r *auth.AuthenticatedRequest) (manualPortMap
 		return request, fmt.Errorf("요청 형식이 올바르지 않습니다: %v", err)
 	}
 	request.SwitchNodeID = strings.TrimSpace(request.SwitchNodeID)
-	request.SwitchPortNodeID = strings.TrimSpace(request.SwitchPortNodeID)
+	request.SwitchPortName = strings.TrimSpace(request.SwitchPortName)
 	request.HostNodeID = strings.TrimSpace(request.HostNodeID)
 	request.HostNICNodeID = strings.TrimSpace(request.HostNICNodeID)
-	if request.SwitchNodeID == "" || request.SwitchPortNodeID == "" || request.HostNodeID == "" || request.HostNICNodeID == "" {
-		return request, errors.New("switchNodeId, switchPortNodeId, hostNodeId, hostNicNodeId가 모두 필요합니다")
+	if request.SwitchNodeID == "" || request.SwitchPortName == "" || request.HostNodeID == "" || request.HostNICNodeID == "" {
+		return request, errors.New("switchNodeId, switchPortName, hostNodeId, hostNicNodeId가 모두 필요합니다")
+	}
+	if utf8.RuneCountInString(request.SwitchPortName) > 255 {
+		return request, errors.New("스위치 포트명은 255자를 초과할 수 없습니다")
+	}
+	if strings.IndexFunc(request.SwitchPortName, unicode.IsControl) >= 0 {
+		return request, errors.New("스위치 포트명에는 제어 문자를 사용할 수 없습니다")
 	}
 	return request, nil
 }
@@ -179,14 +231,10 @@ func (a *manualPortMappingAPI) mappingFromTopology(request manualPortMappingRequ
 	defer a.graph.RUnlock()
 
 	switchNode := a.graph.GetNode(graph.Identifier(request.SwitchNodeID))
-	switchPort := a.graph.GetNode(graph.Identifier(request.SwitchPortNodeID))
 	hostNode := a.graph.GetNode(graph.Identifier(request.HostNodeID))
 	hostNIC := a.graph.GetNode(graph.Identifier(request.HostNICNodeID))
 	if switchNode == nil {
 		return netdivedb.ManualPortMapping{}, fmt.Errorf("스위치 topology node를 찾을 수 없습니다: %s", request.SwitchNodeID)
-	}
-	if switchPort == nil {
-		return netdivedb.ManualPortMapping{}, fmt.Errorf("스위치 포트 topology node를 찾을 수 없습니다: %s", request.SwitchPortNodeID)
 	}
 	if hostNode == nil {
 		return netdivedb.ManualPortMapping{}, fmt.Errorf("호스트 topology node를 찾을 수 없습니다: %s", request.HostNodeID)
@@ -197,35 +245,90 @@ func (a *manualPortMappingAPI) mappingFromTopology(request manualPortMappingRequ
 	if nodeType(switchNode) != "switch" {
 		return netdivedb.ManualPortMapping{}, errors.New("switchNodeId가 스위치 node를 가리키지 않습니다")
 	}
-	if portType := nodeType(switchPort); portType != "switchport" && portType != "port" {
-		return netdivedb.ManualPortMapping{}, errors.New("switchPortNodeId가 스위치 포트 node를 가리키지 않습니다")
-	}
 	if nodeType(hostNode) != "host" {
 		return netdivedb.ManualPortMapping{}, errors.New("hostNodeId가 호스트 node를 가리키지 않습니다")
 	}
 	if !isPhysicalHostNIC(hostNIC) {
 		return netdivedb.ManualPortMapping{}, errors.New("hostNicNodeId가 물리 호스트 NIC node를 가리키지 않습니다")
 	}
-	if !isOwnershipDescendant(a.graph, switchNode, switchPort) {
-		return netdivedb.ManualPortMapping{}, errors.New("스위치 포트가 지정한 스위치에 속하지 않습니다")
-	}
 	if !isOwnershipDescendant(a.graph, hostNode, hostNIC) {
 		return netdivedb.ManualPortMapping{}, errors.New("호스트 NIC가 지정한 호스트에 속하지 않습니다")
 	}
-	if hasAutomaticPortRelation(a.graph, switchPort) {
-		return netdivedb.ManualPortMapping{}, fmt.Errorf("%w: %s", errManualPortAutomaticallyMapped, request.SwitchPortNodeID)
+	if hasAutomaticPortName(a.graph, switchNode, request.SwitchPortName) {
+		return netdivedb.ManualPortMapping{}, fmt.Errorf("%w: %s", errManualPortAutomaticallyMapped, request.SwitchPortName)
+	}
+	if hasAutomaticHostNICRelation(a.graph, hostNIC) {
+		return netdivedb.ManualPortMapping{}, fmt.Errorf("%w: %s", errHostNICAutomaticallyMapped, request.HostNICNodeID)
 	}
 
 	return netdivedb.ManualPortMapping{
-		SwitchNodeID:     string(switchNode.ID),
-		SwitchName:       nodeDisplayName(switchNode),
-		SwitchPortNodeID: string(switchPort.ID),
-		SwitchPortName:   nodeDisplayName(switchPort),
-		HostNodeID:       string(hostNode.ID),
-		HostName:         nodeDisplayName(hostNode),
-		HostNICNodeID:    string(hostNIC.ID),
-		HostNICName:      nodeDisplayName(hostNIC),
+		SwitchNodeID:   string(switchNode.ID),
+		SwitchName:     nodeDisplayName(switchNode),
+		SwitchPortName: request.SwitchPortName,
+		HostNodeID:     string(hostNode.ID),
+		HostName:       nodeDisplayName(hostNode),
+		HostNICNodeID:  string(hostNIC.ID),
+		HostNICName:    nodeDisplayName(hostNIC),
 	}, nil
+}
+
+func hasAutomaticPortName(g *graph.Graph, switchNode *graph.Node, switchPortName string) bool {
+	wanted := strings.TrimSpace(switchPortName)
+	queue := g.LookupChildren(switchNode, nil, topology.OwnershipMetadata())
+	visited := make(map[graph.Identifier]struct{})
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		if _, seen := visited[current.ID]; seen {
+			continue
+		}
+		visited[current.ID] = struct{}{}
+		if portType := nodeType(current); (portType == "switchport" || portType == "port") &&
+			strings.EqualFold(topologyPortName(current), wanted) && hasAutomaticPortRelation(g, current) {
+			return true
+		}
+		queue = append(queue, g.LookupChildren(current, nil, topology.OwnershipMetadata())...)
+	}
+
+	// Older LLDP graphs can link the switch directly to a host NIC and keep the
+	// remote port identifier only in the NIC's LLDP metadata.
+	for _, edge := range g.GetNodeEdges(switchNode, nil) {
+		relationType, _ := edge.GetFieldString("RelationType")
+		if strings.EqualFold(strings.TrimSpace(relationType), topology.OwnershipLink) {
+			continue
+		}
+		parents, children := g.GetEdgeNodes(edge, nil, nil)
+		for _, peer := range append(parents, children...) {
+			if peer.ID == switchNode.ID {
+				continue
+			}
+			if strings.EqualFold(lldpRemotePortName(peer), wanted) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func topologyPortName(node *graph.Node) string {
+	for _, field := range []string{"Name", "PortID", "PortId", "IfName", "InterfaceName"} {
+		if value, err := node.GetFieldString(field); err == nil && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return string(node.ID)
+}
+
+func lldpRemotePortName(node *graph.Node) string {
+	for _, field := range []string{
+		"LLDP.RemotePortID", "LLDP.RemotePortId", "LLDP.PortID", "LLDP.PortId", "LLDP.RemotePortDescription",
+		"RemotePortID", "RemotePortId", "PortID", "PortId", "RemotePortDescription",
+	} {
+		if value, err := node.GetFieldString(field); err == nil && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 // A switch port with a collected non-ownership edge is already represented by
@@ -237,6 +340,47 @@ func hasAutomaticPortRelation(g *graph.Graph, switchPort *graph.Node) bool {
 		if !strings.EqualFold(strings.TrimSpace(relationType), topology.OwnershipLink) {
 			return true
 		}
+	}
+	return false
+}
+
+func hasAutomaticHostNICRelation(g *graph.Graph, hostNIC *graph.Node) bool {
+	for _, edge := range g.GetNodeEdges(hostNIC, nil) {
+		relationType, _ := edge.GetFieldString("RelationType")
+		if strings.EqualFold(strings.TrimSpace(relationType), topology.OwnershipLink) {
+			continue
+		}
+		parents, children := g.GetEdgeNodes(edge, nil, nil)
+		for _, peer := range append(parents, children...) {
+			if peer.ID == hostNIC.ID {
+				continue
+			}
+			if nodeType(peer) == "switch" || isSwitchPortOwnedBySwitch(g, peer) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isSwitchPortOwnedBySwitch(g *graph.Graph, node *graph.Node) bool {
+	portType := nodeType(node)
+	if portType != "switchport" && portType != "port" {
+		return false
+	}
+	visited := make(map[graph.Identifier]struct{})
+	queue := g.LookupParents(node, nil, topology.OwnershipMetadata())
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		if _, seen := visited[current.ID]; seen {
+			continue
+		}
+		visited[current.ID] = struct{}{}
+		if nodeType(current) == "switch" {
+			return true
+		}
+		queue = append(queue, g.LookupParents(current, nil, topology.OwnershipMetadata())...)
 	}
 	return false
 }
@@ -288,7 +432,7 @@ func (a *manualPortMappingAPI) writeDatabaseError(w http.ResponseWriter, err err
 	case errors.Is(err, netdivedb.ErrManualPortMappingNotFound):
 		writeManualPortMappingError(w, http.StatusNotFound, "수동 매핑을 찾을 수 없습니다.")
 	case errors.Is(err, netdivedb.ErrManualPortMappingConflict):
-		writeManualPortMappingError(w, http.StatusConflict, "선택한 스위치 포트 또는 호스트 NIC에 활성 수동 매핑이 이미 있습니다.")
+		writeManualPortMappingError(w, http.StatusConflict, "동일한 스위치 포트명 또는 호스트 NIC에 활성 수동 매핑이 이미 있습니다.")
 	default:
 		writeManualPortMappingError(w, http.StatusInternalServerError, err.Error())
 	}
@@ -297,6 +441,10 @@ func (a *manualPortMappingAPI) writeDatabaseError(w http.ResponseWriter, err err
 func (a *manualPortMappingAPI) writeTopologyValidationError(w http.ResponseWriter, err error) {
 	if errors.Is(err, errManualPortAutomaticallyMapped) {
 		writeManualPortMappingError(w, http.StatusConflict, "LLDP로 자동 연결된 스위치 포트는 수동 매핑할 수 없습니다.")
+		return
+	}
+	if errors.Is(err, errHostNICAutomaticallyMapped) {
+		writeManualPortMappingError(w, http.StatusConflict, "LLDP로 자동 연결된 호스트 NIC는 수동 매핑할 수 없습니다.")
 		return
 	}
 	writeManualPortMappingError(w, http.StatusUnprocessableEntity, err.Error())
@@ -314,7 +462,7 @@ func writeManualPortMappingJSON(w http.ResponseWriter, status int, payload inter
 
 // RegisterManualPortMappingAPI registers authenticated supplemental mapping
 // endpoints. Automatic LLDP data remains exclusively in the topology graph.
-func RegisterManualPortMappingAPI(httpServer *shttp.Server, authBackend shttp.AuthenticationBackend, db *netdivedb.Database, g *graph.Graph) {
+func RegisterManualPortMappingAPI(httpServer *shttp.Server, authBackend shttp.AuthenticationBackend, db *netdivedb.Database, g *graph.Graph) func() {
 	api := &manualPortMappingAPI{db: db, graph: g}
 	httpServer.RegisterRoutes([]shttp.Route{
 		{Name: "ManualPortMappingList", Method: "GET", Path: "/api/infrastructure/manual-port-mappings", HandlerFunc: api.list},
@@ -322,4 +470,8 @@ func RegisterManualPortMappingAPI(httpServer *shttp.Server, authBackend shttp.Au
 		{Name: "ManualPortMappingUpdate", Method: "PUT", Path: "/api/infrastructure/manual-port-mappings/{id:[0-9]+}", HandlerFunc: api.update},
 		{Name: "ManualPortMappingDelete", Method: "DELETE", Path: "/api/infrastructure/manual-port-mappings/{id:[0-9]+}", HandlerFunc: api.disable},
 	}, authBackend)
+	reconciler := &manualPortMappingReconciler{db: db, graph: g}
+	g.AddEventListener(reconciler)
+	reconciler.reconcile()
+	return func() { g.RemoveEventListener(reconciler) }
 }

@@ -84,17 +84,18 @@ type Status struct {
 
 // Server describes an Analyzer servers mechanism like http, websocket, topology, ondemand probes, ...
 type Server struct {
-	uiServer        *ui.Server
-	hub             *hub.Hub
-	onDemandClient  *client.OnDemandClient
-	piClient        *client.OnDemandClient
-	topologyManager *usertopology.TopologyManager
-	flowServer      *server.FlowServer
-	probeBundle     *probe.Bundle
-	graphStorage    graph.PersistentBackend
-	flowStorage     storage.Storage
-	etcdClient      *etcdclient.Client
-	localDB         *netdivedb.Database
+	uiServer                 *ui.Server
+	hub                      *hub.Hub
+	onDemandClient           *client.OnDemandClient
+	piClient                 *client.OnDemandClient
+	topologyManager          *usertopology.TopologyManager
+	flowServer               *server.FlowServer
+	probeBundle              *probe.Bundle
+	graphStorage             graph.PersistentBackend
+	flowStorage              storage.Storage
+	etcdClient               *etcdclient.Client
+	localDB                  *netdivedb.Database
+	manualPortMappingCleanup func()
 }
 
 // GetStatus returns the status of an analyzer
@@ -233,6 +234,9 @@ func (s *Server) Stop() {
 
 	if s.flowStorage != nil {
 		s.flowStorage.Stop()
+	}
+	if s.manualPortMappingCleanup != nil {
+		s.manualPortMappingCleanup()
 	}
 
 	if err := s.localDB.Close(); err != nil {
@@ -444,7 +448,7 @@ func NewServerFromConfig() (*Server, error) {
 	api.RegisterMoldManagementServerAPI(httpServer)
 	api.RegisterInfrastructureAgentRestartAPI(httpServer, apiAuthBackend)
 	if s.localDB != nil {
-		api.RegisterManualPortMappingAPI(httpServer, apiAuthBackend, s.localDB, g)
+		s.manualPortMappingCleanup = api.RegisterManualPortMappingAPI(httpServer, apiAuthBackend, s.localDB, g)
 	}
 	api.RegisterWallHostTrendAPI(hub.HTTPServer())
 
