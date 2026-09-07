@@ -25,6 +25,8 @@ import (
 
 const manualPortMappingObject = "manual-port-mapping"
 
+var errManualPortAutomaticallyMapped = errors.New("switch port already has an automatic topology relation")
+
 type manualPortMappingAPI struct {
 	db    *netdivedb.Database
 	graph *graph.Graph
@@ -77,7 +79,7 @@ func (a *manualPortMappingAPI) create(w http.ResponseWriter, r *auth.Authenticat
 	}
 	mapping, err := a.mappingFromTopology(request)
 	if err != nil {
-		writeManualPortMappingError(w, http.StatusUnprocessableEntity, err.Error())
+		a.writeTopologyValidationError(w, err)
 		return
 	}
 	mapping.Enabled = true
@@ -114,7 +116,7 @@ func (a *manualPortMappingAPI) update(w http.ResponseWriter, r *auth.Authenticat
 	}
 	mapping, err := a.mappingFromTopology(request)
 	if err != nil {
-		writeManualPortMappingError(w, http.StatusUnprocessableEntity, err.Error())
+		a.writeTopologyValidationError(w, err)
 		return
 	}
 	mapping.ID = id
@@ -210,6 +212,9 @@ func (a *manualPortMappingAPI) mappingFromTopology(request manualPortMappingRequ
 	if !isOwnershipDescendant(a.graph, hostNode, hostNIC) {
 		return netdivedb.ManualPortMapping{}, errors.New("호스트 NIC가 지정한 호스트에 속하지 않습니다")
 	}
+	if hasAutomaticPortRelation(a.graph, switchPort) {
+		return netdivedb.ManualPortMapping{}, fmt.Errorf("%w: %s", errManualPortAutomaticallyMapped, request.SwitchPortNodeID)
+	}
 
 	return netdivedb.ManualPortMapping{
 		SwitchNodeID:     string(switchNode.ID),
@@ -221,6 +226,19 @@ func (a *manualPortMappingAPI) mappingFromTopology(request manualPortMappingRequ
 		HostNICNodeID:    string(hostNIC.ID),
 		HostNICName:      nodeDisplayName(hostNIC),
 	}, nil
+}
+
+// A switch port with a collected non-ownership edge is already represented by
+// the topology graph and must remain read-only. Manual mappings only supplement
+// ports for which LLDP did not produce a relation.
+func hasAutomaticPortRelation(g *graph.Graph, switchPort *graph.Node) bool {
+	for _, edge := range g.GetNodeEdges(switchPort, nil) {
+		relationType, _ := edge.GetFieldString("RelationType")
+		if !strings.EqualFold(strings.TrimSpace(relationType), topology.OwnershipLink) {
+			return true
+		}
+	}
+	return false
 }
 
 func nodeType(node *graph.Node) string {
@@ -276,6 +294,14 @@ func (a *manualPortMappingAPI) writeDatabaseError(w http.ResponseWriter, err err
 	}
 }
 
+func (a *manualPortMappingAPI) writeTopologyValidationError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errManualPortAutomaticallyMapped) {
+		writeManualPortMappingError(w, http.StatusConflict, "LLDP로 자동 연결된 스위치 포트는 수동 매핑할 수 없습니다.")
+		return
+	}
+	writeManualPortMappingError(w, http.StatusUnprocessableEntity, err.Error())
+}
+
 func writeManualPortMappingError(w http.ResponseWriter, status int, message string) {
 	writeManualPortMappingJSON(w, status, map[string]string{"message": message})
 }
@@ -286,7 +312,7 @@ func writeManualPortMappingJSON(w http.ResponseWriter, status int, payload inter
 	_ = json.NewEncoder(w).Encode(payload)
 }
 
-// RegisterManualPortMappingAPI registers the authenticated manual correction
+// RegisterManualPortMappingAPI registers authenticated supplemental mapping
 // endpoints. Automatic LLDP data remains exclusively in the topology graph.
 func RegisterManualPortMappingAPI(httpServer *shttp.Server, authBackend shttp.AuthenticationBackend, db *netdivedb.Database, g *graph.Graph) {
 	api := &manualPortMappingAPI{db: db, graph: g}

@@ -176,6 +176,28 @@ func TestManualPortMappingAPIRejectsInvalidTopologyAndConflict(t *testing.T) {
 	}
 }
 
+func TestManualPortMappingAPIRejectsAutomaticallyMappedPort(t *testing.T) {
+	fixture := newManualPortMappingAPIFixture(t)
+	port := fixture.graph.GetNode(graph.Identifier("port-1"))
+	nic := fixture.graph.GetNode(graph.Identifier("nic-1"))
+	if _, err := topology.AddLayer2Link(fixture.graph, port, nic, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	body := manualPortMappingRequest{
+		SwitchNodeID: "switch-1", SwitchPortNodeID: "port-1",
+		HostNodeID: "host-1", HostNICNodeID: "nic-1",
+	}
+	recorder := httptest.NewRecorder()
+	fixture.api.create(recorder, authenticatedManualPortMappingRequest(http.MethodPost, "/api/infrastructure/manual-port-mappings", body))
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("automatic mapping conflict status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "LLDP") {
+		t.Fatalf("automatic mapping conflict body = %s", recorder.Body.String())
+	}
+}
+
 func TestManualPortMappingRBACPolicyIsBundled(t *testing.T) {
 	policy, err := statics.Asset("rbac/policy.csv")
 	if err != nil {
