@@ -443,6 +443,9 @@ func NewServerFromConfig() (*Server, error) {
 	api.RegisterMoldHostDetailAPI(httpServer)
 	api.RegisterMoldManagementServerAPI(httpServer)
 	api.RegisterInfrastructureAgentRestartAPI(httpServer, apiAuthBackend)
+	if s.localDB != nil {
+		api.RegisterManualPortMappingAPI(httpServer, apiAuthBackend, s.localDB, g)
+	}
 	api.RegisterWallHostTrendAPI(hub.HTTPServer())
 
 	if err := s.loadStaticWorkflows(); err != nil {

@@ -8,6 +8,7 @@ package database
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -185,6 +186,80 @@ func TestActiveMappingUniquenessAndDisabledHistory(t *testing.T) {
 	}
 	if _, err := db.SQLDB().Exec(insert, "switch-2", "port-1", "host-2", "nic-1", 0); err != nil {
 		t.Fatalf("disabled history should be allowed: %v", err)
+	}
+}
+
+func TestManualPortMappingRepositoryCRUDAndFilters(t *testing.T) {
+	db, err := Open(context.Background(), testConfig(filepath.Join(t.TempDir(), "netdive.db")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	created, err := db.CreateManualPortMapping(context.Background(), ManualPortMapping{
+		SwitchNodeID: "switch-1", SwitchName: "Switch 1",
+		SwitchPortNodeID: "port-1", SwitchPortName: "Ethernet1",
+		HostNodeID: "host-1", HostName: "Host 1",
+		HostNICNodeID: "nic-1", HostNICName: "eno1", Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.ID <= 0 || created.CreatedAt == "" || !created.Enabled {
+		t.Fatalf("unexpected created mapping: %+v", created)
+	}
+
+	bySwitch, err := db.ListManualPortMappings(context.Background(), ManualPortMappingFilter{SwitchNodeID: "switch-1"})
+	if err != nil || len(bySwitch) != 1 {
+		t.Fatalf("switch filter returned %+v, %v", bySwitch, err)
+	}
+	byHostNIC, err := db.ListManualPortMappings(context.Background(), ManualPortMappingFilter{HostNodeID: "host-1", HostNICNodeID: "nic-1"})
+	if err != nil || len(byHostNIC) != 1 {
+		t.Fatalf("host/NIC filter returned %+v, %v", byHostNIC, err)
+	}
+
+	created.SwitchPortNodeID = "port-2"
+	created.SwitchPortName = "Ethernet2"
+	updated, err := db.UpdateManualPortMapping(context.Background(), created)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.SwitchPortNodeID != "port-2" || updated.CreatedAt != created.CreatedAt {
+		t.Fatalf("unexpected updated mapping: %+v", updated)
+	}
+
+	if err := db.DisableManualPortMapping(context.Background(), created.ID); err != nil {
+		t.Fatal(err)
+	}
+	active, err := db.ListManualPortMappings(context.Background(), ManualPortMappingFilter{})
+	if err != nil || len(active) != 0 {
+		t.Fatalf("active mappings returned %+v, %v", active, err)
+	}
+	all, err := db.ListManualPortMappings(context.Background(), ManualPortMappingFilter{IncludeDisabled: true})
+	if err != nil || len(all) != 1 || all[0].Enabled {
+		t.Fatalf("all mappings returned %+v, %v", all, err)
+	}
+	if err := db.DisableManualPortMapping(context.Background(), 9999); !errors.Is(err, ErrManualPortMappingNotFound) {
+		t.Fatalf("missing disable error = %v", err)
+	}
+}
+
+func TestManualPortMappingRepositoryReturnsConflict(t *testing.T) {
+	db, err := Open(context.Background(), testConfig(filepath.Join(t.TempDir(), "netdive.db")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	base := ManualPortMapping{
+		SwitchNodeID: "switch-1", SwitchPortNodeID: "port-1",
+		HostNodeID: "host-1", HostNICNodeID: "nic-1", Enabled: true,
+	}
+	if _, err := db.CreateManualPortMapping(context.Background(), base); err != nil {
+		t.Fatal(err)
+	}
+	base.HostNICNodeID = "nic-2"
+	if _, err := db.CreateManualPortMapping(context.Background(), base); !errors.Is(err, ErrManualPortMappingConflict) {
+		t.Fatalf("duplicate port error = %v", err)
 	}
 }
 

@@ -28,6 +28,8 @@ p, admin, edgerule, write, allow
 p, admin, workflow.call, write, allow
 p, admin, infrastructure-agent, read, allow
 p, admin, infrastructure-agent, write, allow
+p, admin, manual-port-mapping, read, allow
+p, admin, manual-port-mapping, write, allow
 
 p, guest, alert, read, deny
 p, guest, alert, write, deny
@@ -44,6 +46,8 @@ p, guest, workflow, read, deny
 p, guest, workflow, write, deny
 p, guest, infrastructure-agent, read, deny
 p, guest, infrastructure-agent, write, deny
+p, guest, manual-port-mapping, read, deny
+p, guest, manual-port-mapping, write, deny
 p, guest, websocket, /ws/agent/topology, deny
 p, guest, websocket, /ws/agent/flow, deny
 p, guest, websocket, /ws/subscriber/flow, deny
