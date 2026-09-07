@@ -1,6 +1,11 @@
 package server
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"reflect"
+	"testing"
+)
 
 func TestSelectInfrastructureAgentHosts(t *testing.T) {
 	hosts := []moldHostDetail{
@@ -49,6 +54,40 @@ func TestFilterInfrastructureAgentHostsExcludesSystemVMHosts(t *testing.T) {
 	}
 	if _, err := selectInfrastructureAgentHosts(filtered, []string{"ssvm"}); err == nil {
 		t.Fatal("an explicitly requested system VM must not bypass the Agent-host filter")
+	}
+}
+
+func TestInfrastructureAgentSSHArgsUsesConfiguredIdentity(t *testing.T) {
+	keyPath := filepath.Join(t.TempDir(), "agent-restart-key")
+	if err := os.WriteFile(keyPath, []byte("test key"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	args, err := infrastructureAgentSSHArgs(
+		moldHostDetail{ManagementIP: "10.10.22.1"},
+		infrastructureAgentSSHConfig{User: "root", Port: 2222, PrivateKeyPath: keyPath},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
+		"-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+		"-o", "LogLevel=ERROR", "-o", "ConnectTimeout=5",
+		"-p", "2222", "-i", keyPath, "root@10.10.22.1",
+		"systemctl reset-failed netdive-agent.service >/dev/null 2>&1 || true; systemctl restart netdive-agent.service",
+	}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("ssh args=%#v, want %#v", args, want)
+	}
+}
+
+func TestInfrastructureAgentSSHArgsRejectsMissingIdentity(t *testing.T) {
+	_, err := infrastructureAgentSSHArgs(
+		moldHostDetail{ManagementIP: "10.10.22.1"},
+		infrastructureAgentSSHConfig{User: "root", Port: 22, PrivateKeyPath: filepath.Join(t.TempDir(), "missing")},
+	)
+	if err == nil {
+		t.Fatal("missing SSH identity must be rejected before starting ssh")
 	}
 }
 

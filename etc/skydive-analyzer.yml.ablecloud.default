@@ -23,6 +23,11 @@ analyzer:
         - networkpolicy
 
 mold:
+  infrastructureAgent:
+    ssh:
+      user: "root"
+      port: 22
+      privateKeyPath: "/root/.ssh/id_rsa"
   vmNetworkMap:
     refreshInterval: 10
   console:
@@ -41,3 +46,10 @@ mold:
     name: "cloud"
     user: "cloud"
     passwordFile: "/usr/share/ablestack/ablestack-netdive/secrets/mold-db-password"
+
+custom:
+  database:
+    driver: "sqlite3"
+    path: "/usr/share/ablestack/ablestack-netdive/netdive.db"
+    journalMode: "WAL"
+    busyTimeout: 5000

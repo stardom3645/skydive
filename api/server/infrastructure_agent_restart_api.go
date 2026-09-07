@@ -5,14 +5,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	auth "github.com/abbot/go-http-auth"
 
+	"github.com/skydive-project/skydive/config"
 	shttp "github.com/skydive-project/skydive/graffiti/http"
 	"github.com/skydive-project/skydive/graffiti/rbac"
 )
@@ -59,6 +62,59 @@ var infrastructureAgentRestartState = struct {
 }
 
 var runInfrastructureAgentRestart = restartInfrastructureAgent
+
+type infrastructureAgentSSHConfig struct {
+	User           string
+	Port           int
+	PrivateKeyPath string
+}
+
+func currentInfrastructureAgentSSHConfig() infrastructureAgentSSHConfig {
+	sshConfig := infrastructureAgentSSHConfig{
+		User:           strings.TrimSpace(config.GetString("mold.infrastructureAgent.ssh.user")),
+		Port:           config.GetInt("mold.infrastructureAgent.ssh.port"),
+		PrivateKeyPath: strings.TrimSpace(config.GetString("mold.infrastructureAgent.ssh.privateKeyPath")),
+	}
+	if sshConfig.User == "" {
+		sshConfig.User = "root"
+	}
+	if sshConfig.Port <= 0 {
+		sshConfig.Port = 22
+	}
+	if sshConfig.PrivateKeyPath == "" {
+		sshConfig.PrivateKeyPath = "/root/.ssh/id_rsa"
+	}
+	return sshConfig
+}
+
+func infrastructureAgentSSHArgs(host moldHostDetail, sshConfig infrastructureAgentSSHConfig) ([]string, error) {
+	managementIP := strings.TrimSpace(host.ManagementIP)
+	if managementIP == "" {
+		return nil, fmt.Errorf("관리 IP가 없습니다")
+	}
+	keyInfo, err := os.Stat(sshConfig.PrivateKeyPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("SSH 개인키를 찾을 수 없습니다: %s", sshConfig.PrivateKeyPath)
+		}
+		return nil, fmt.Errorf("SSH 개인키를 확인할 수 없습니다: %v", err)
+	}
+	if !keyInfo.Mode().IsRegular() {
+		return nil, fmt.Errorf("SSH 개인키 경로가 일반 파일이 아닙니다: %s", sshConfig.PrivateKeyPath)
+	}
+	return []string{
+		"-o", "BatchMode=yes",
+		"-o", "IdentitiesOnly=yes",
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=/dev/null",
+		"-o", "LogLevel=ERROR",
+		"-o", "ConnectTimeout=5",
+		"-p", strconv.Itoa(sshConfig.Port),
+		"-i", sshConfig.PrivateKeyPath,
+		sshConfig.User + "@" + managementIP,
+		"systemctl reset-failed netdive-agent.service >/dev/null 2>&1 || true; systemctl restart netdive-agent.service",
+	}, nil
+}
 
 func listInfrastructureAgentHosts() ([]moldHostDetail, error) {
 	body, _, err := requestMoldAPI(moldHostListCommand, []apiParam{
@@ -143,20 +199,13 @@ func selectInfrastructureAgentHosts(hosts []moldHostDetail, requestedIDs []strin
 }
 
 func restartInfrastructureAgent(host moldHostDetail) error {
-	managementIP := strings.TrimSpace(host.ManagementIP)
-	if managementIP == "" {
-		return fmt.Errorf("관리 IP가 없습니다")
+	args, err := infrastructureAgentSSHArgs(host, currentInfrastructureAgentSSHConfig())
+	if err != nil {
+		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	command := exec.CommandContext(ctx,
-		"ssh",
-		"-o", "BatchMode=yes",
-		"-o", "StrictHostKeyChecking=no",
-		"-o", "ConnectTimeout=5",
-		"root@"+managementIP,
-		"systemctl reset-failed netdive-agent.service >/dev/null 2>&1 || true; systemctl restart netdive-agent.service",
-	)
+	command := exec.CommandContext(ctx, "ssh", args...)
 	output, err := command.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
 		return fmt.Errorf("재시작 명령 시간이 초과되었습니다")

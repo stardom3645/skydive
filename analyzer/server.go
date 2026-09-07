@@ -20,6 +20,7 @@
 package analyzer
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"net/http"
@@ -49,6 +50,7 @@ import (
 	"github.com/skydive-project/skydive/graffiti/ondemand/client"
 	ws "github.com/skydive-project/skydive/graffiti/websocket"
 	ge "github.com/skydive-project/skydive/gremlin/traversal"
+	netdivedb "github.com/skydive-project/skydive/netdive/database"
 	"github.com/skydive-project/skydive/packetinjector"
 	"github.com/skydive-project/skydive/probe"
 	"github.com/skydive-project/skydive/sflow"
@@ -92,6 +94,7 @@ type Server struct {
 	graphStorage    graph.PersistentBackend
 	flowStorage     storage.Storage
 	etcdClient      *etcdclient.Client
+	localDB         *netdivedb.Database
 }
 
 // GetStatus returns the status of an analyzer
@@ -232,6 +235,10 @@ func (s *Server) Stop() {
 		s.flowStorage.Stop()
 	}
 
+	if err := s.localDB.Close(); err != nil {
+		logging.GetLogger().Errorf("Failed to close Netdive database: %s", err)
+	}
+
 	if tr, ok := http.DefaultTransport.(interface {
 		CloseIdleConnections()
 	}); ok {
@@ -308,10 +315,22 @@ func NewServerFromConfig() (*Server, error) {
 		return nil, err
 	}
 
+	localDB, err := netdivedb.OpenFromConfig(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	keepLocalDB := false
+	defer func() {
+		if !keepLocalDB {
+			localDB.Close()
+		}
+	}()
+
 	s := &Server{
 		probeBundle:  probeBundle,
 		etcdClient:   etcdClient,
 		graphStorage: graphStorage,
+		localDB:      localDB,
 	}
 
 	opts := hub.Opts{
@@ -436,6 +455,7 @@ func NewServerFromConfig() (*Server, error) {
 		}
 	}
 
+	keepLocalDB = true
 	return s, nil
 }
 

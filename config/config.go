@@ -208,6 +208,13 @@ func init() {
 	cfg.SetDefault("mold.kubernetes.transitionGracePeriod", 20)
 	cfg.SetDefault("analyzer.topology.k8s.probes", []string{"cluster", "namespace", "node", "pod", "service", "deployment", "daemonset", "statefulset", "ingress", "networkpolicy"})
 
+	// ABLESTACK Netdive local database. An empty driver keeps the database
+	// disabled for non-Netdive deployments; the Netdive configuration enables it.
+	cfg.SetDefault("custom.database.driver", "")
+	cfg.SetDefault("custom.database.path", "/usr/share/ablestack/ablestack-netdive/netdive.db")
+	cfg.SetDefault("custom.database.journalMode", "WAL")
+	cfg.SetDefault("custom.database.busyTimeout", 5000)
+
 	cfg.SetDefault("ovs.ovsdb", "unix:///var/run/openvswitch/db.sock")
 	cfg.SetDefault("ovs.oflow.enable", false)
 	cfg.SetDefault("ovs.oflow.openflow_versions", []string{"OpenFlow10", "OpenFlow11", "OpenFlow12", "OpenFlow13", "OpenFlow14"})
