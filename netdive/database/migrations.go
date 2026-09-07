@@ -15,6 +15,7 @@ type migration struct {
 	version    int
 	name       string
 	statements []string
+	validate   func(context.Context, *sql.Tx) error
 }
 
 var migrations = []migration{
@@ -22,7 +23,7 @@ var migrations = []migration{
 		version: 1,
 		name:    "create manual port mappings",
 		statements: []string{
-			`CREATE TABLE manual_port_mapping (
+			`CREATE TABLE IF NOT EXISTS manual_port_mapping (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
 				switch_node_id TEXT NOT NULL,
 				switch_name TEXT,
@@ -36,15 +37,16 @@ var migrations = []migration{
 				created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
 				updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 			)`,
-			`CREATE UNIQUE INDEX ux_manual_port_mapping_active_switch_port
+			`CREATE UNIQUE INDEX IF NOT EXISTS ux_manual_port_mapping_active_switch_port
 				ON manual_port_mapping (switch_port_node_id) WHERE enabled = 1`,
-			`CREATE UNIQUE INDEX ux_manual_port_mapping_active_host_nic
+			`CREATE UNIQUE INDEX IF NOT EXISTS ux_manual_port_mapping_active_host_nic
 				ON manual_port_mapping (host_nic_node_id) WHERE enabled = 1`,
-			`CREATE INDEX ix_manual_port_mapping_switch
+			`CREATE INDEX IF NOT EXISTS ix_manual_port_mapping_switch
 				ON manual_port_mapping (switch_node_id, switch_port_node_id)`,
-			`CREATE INDEX ix_manual_port_mapping_host_nic
+			`CREATE INDEX IF NOT EXISTS ix_manual_port_mapping_host_nic
 				ON manual_port_mapping (host_node_id, host_nic_node_id)`,
 		},
+		validate: validateManualPortMappingSchema,
 	},
 }
 
@@ -101,6 +103,11 @@ func (d *Database) applyMigration(ctx context.Context, migration migration) erro
 			return err
 		}
 	}
+	if migration.validate != nil {
+		if err := migration.validate(ctx, tx); err != nil {
+			return fmt.Errorf("schema validation failed: %w", err)
+		}
+	}
 	if _, err := tx.ExecContext(ctx,
 		"INSERT INTO schema_migrations (version, name) VALUES (?, ?)",
 		migration.version, migration.name,
@@ -108,4 +115,104 @@ func (d *Database) applyMigration(ctx context.Context, migration migration) erro
 		return err
 	}
 	return tx.Commit()
+}
+
+func validateManualPortMappingSchema(ctx context.Context, tx *sql.Tx) error {
+	requiredColumns := map[string]bool{
+		"id": false, "switch_node_id": false, "switch_name": false,
+		"switch_port_node_id": false, "switch_port_name": false,
+		"host_node_id": false, "host_name": false,
+		"host_nic_node_id": false, "host_nic_name": false,
+		"enabled": false, "created_at": false, "updated_at": false,
+	}
+	rows, err := tx.QueryContext(ctx, "PRAGMA table_info(manual_port_mapping)")
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue interface{}
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return err
+		}
+		if _, required := requiredColumns[name]; required {
+			requiredColumns[name] = true
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for name, found := range requiredColumns {
+		if !found {
+			return fmt.Errorf("manual_port_mapping is missing required column %q", name)
+		}
+	}
+
+	type indexRequirement struct {
+		unique  int
+		partial int
+		columns []string
+	}
+	requiredIndexes := map[string]indexRequirement{
+		"ux_manual_port_mapping_active_switch_port": {unique: 1, partial: 1, columns: []string{"switch_port_node_id"}},
+		"ux_manual_port_mapping_active_host_nic":    {unique: 1, partial: 1, columns: []string{"host_nic_node_id"}},
+		"ix_manual_port_mapping_switch":             {columns: []string{"switch_node_id", "switch_port_node_id"}},
+		"ix_manual_port_mapping_host_nic":           {columns: []string{"host_node_id", "host_nic_node_id"}},
+	}
+	indexRows, err := tx.QueryContext(ctx, "PRAGMA index_list(manual_port_mapping)")
+	if err != nil {
+		return err
+	}
+	foundIndexes := make(map[string]indexRequirement)
+	for indexRows.Next() {
+		var sequence, unique, partial int
+		var name, origin string
+		if err := indexRows.Scan(&sequence, &name, &unique, &origin, &partial); err != nil {
+			indexRows.Close()
+			return err
+		}
+		if required, ok := requiredIndexes[name]; ok {
+			required.unique = unique
+			required.partial = partial
+			foundIndexes[name] = required
+		}
+	}
+	if err := indexRows.Close(); err != nil {
+		return err
+	}
+
+	for name, required := range requiredIndexes {
+		found, ok := foundIndexes[name]
+		if !ok || found.unique != required.unique || found.partial != required.partial {
+			return fmt.Errorf("manual_port_mapping index %q is missing or incompatible", name)
+		}
+		columnRows, err := tx.QueryContext(ctx, "PRAGMA index_info("+name+")")
+		if err != nil {
+			return err
+		}
+		var columns []string
+		for columnRows.Next() {
+			var sequence, cid int
+			var column string
+			if err := columnRows.Scan(&sequence, &cid, &column); err != nil {
+				columnRows.Close()
+				return err
+			}
+			columns = append(columns, column)
+		}
+		if err := columnRows.Close(); err != nil {
+			return err
+		}
+		if len(columns) != len(required.columns) {
+			return fmt.Errorf("manual_port_mapping index %q has incompatible columns", name)
+		}
+		for i := range columns {
+			if columns[i] != required.columns[i] {
+				return fmt.Errorf("manual_port_mapping index %q has incompatible columns", name)
+			}
+		}
+	}
+	return nil
 }

@@ -116,6 +116,54 @@ func TestReopenPreservesDataAndMigrationsAreIdempotent(t *testing.T) {
 	}
 }
 
+func TestAdoptsCompatiblePrecreatedTemplateSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "netdive.db")
+	raw, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range migrations[0].statements {
+		if _, err := raw.Exec(statement); err != nil {
+			raw.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := Open(context.Background(), testConfig(path))
+	if err != nil {
+		t.Fatalf("open compatible precreated template: %v", err)
+	}
+	defer db.Close()
+	version, err := db.SchemaVersion(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != 1 {
+		t.Fatalf("schema version = %d, want 1", version)
+	}
+}
+
+func TestRejectsIncompatiblePrecreatedTemplateSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "netdive.db")
+	raw, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec("CREATE TABLE manual_port_mapping (id INTEGER PRIMARY KEY)"); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(context.Background(), testConfig(path)); err == nil {
+		t.Fatal("expected incompatible precreated schema to fail")
+	}
+}
+
 func TestActiveMappingUniquenessAndDisabledHistory(t *testing.T) {
 	db, err := Open(context.Background(), testConfig(filepath.Join(t.TempDir(), "netdive.db")))
 	if err != nil {
