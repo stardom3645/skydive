@@ -20,6 +20,18 @@ import (
 var (
 	ErrManualPortMappingNotFound = errors.New("manual port mapping not found")
 	ErrManualPortMappingConflict = errors.New("manual port mapping conflicts with an active mapping")
+	ErrManualPortMappingInactive = errors.New("inactive manual port mapping history cannot be modified")
+)
+
+// Manual mapping disable reasons are persisted so an AUTO takeover remains
+// explainable after an analyzer restart. They are intentionally data values,
+// not translated labels; API/UI callers may localize them independently.
+const (
+	ManualPortMappingDisabledByUser             = "user"
+	ManualPortMappingDisabledByLLDPMatch        = "lldp_auto_match"
+	ManualPortMappingDisabledByLLDPPortConflict = "lldp_auto_port_conflict"
+	ManualPortMappingDisabledByLLDPNICConflict  = "lldp_auto_nic_conflict"
+	ManualPortMappingDisabledByLLDPConflict     = "lldp_auto_conflict"
 )
 
 // ManualPortMapping is a persisted administrator-supplied physical relation.
@@ -127,18 +139,17 @@ func (d *Database) CreateManualPortMapping(ctx context.Context, mapping ManualPo
 	return d.GetManualPortMapping(ctx, id)
 }
 
-// UpdateManualPortMapping replaces the stable endpoints and enabled state of
-// one mapping while preserving its creation timestamp.
+// UpdateManualPortMapping replaces the stable endpoints of an active mapping
+// while preserving its creation timestamp. Disabled rows are immutable audit
+// history and must never be reactivated in place after an AUTO takeover.
 func (d *Database) UpdateManualPortMapping(ctx context.Context, mapping ManualPortMapping) (ManualPortMapping, error) {
 	result, err := d.db.ExecContext(ctx, `UPDATE manual_port_mapping SET
 		switch_node_id = ?, switch_name = ?, switch_port_node_id = ?, switch_port_name = ?,
-		host_node_id = ?, host_name = ?, host_nic_node_id = ?, host_nic_name = ?, enabled = ?,
-		disabled_reason = CASE WHEN ? = 1 THEN NULL ELSE disabled_reason END,
+		host_node_id = ?, host_name = ?, host_nic_node_id = ?, host_nic_name = ?,
 		updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-		WHERE id = ?`,
+		WHERE id = ? AND enabled = 1`,
 		mapping.SwitchNodeID, mapping.SwitchName, nullableText(mapping.SwitchPortNodeID), strings.TrimSpace(mapping.SwitchPortName),
-		mapping.HostNodeID, mapping.HostName, mapping.HostNICNodeID, mapping.HostNICName,
-		boolInt(mapping.Enabled), boolInt(mapping.Enabled), mapping.ID)
+		mapping.HostNodeID, mapping.HostName, mapping.HostNICNodeID, mapping.HostNICName, mapping.ID)
 	if err != nil {
 		return ManualPortMapping{}, manualPortMappingWriteError("update", err)
 	}
@@ -147,7 +158,13 @@ func (d *Database) UpdateManualPortMapping(ctx context.Context, mapping ManualPo
 		return ManualPortMapping{}, fmt.Errorf("read updated manual port mapping count: %w", err)
 	}
 	if affected == 0 {
-		return ManualPortMapping{}, ErrManualPortMappingNotFound
+		var enabled int
+		if err := d.db.QueryRowContext(ctx, "SELECT enabled FROM manual_port_mapping WHERE id = ?", mapping.ID).Scan(&enabled); err == sql.ErrNoRows {
+			return ManualPortMapping{}, ErrManualPortMappingNotFound
+		} else if err != nil {
+			return ManualPortMapping{}, fmt.Errorf("check updated manual port mapping: %w", err)
+		}
+		return ManualPortMapping{}, ErrManualPortMappingInactive
 	}
 	return d.GetManualPortMapping(ctx, mapping.ID)
 }
@@ -156,8 +173,8 @@ func (d *Database) UpdateManualPortMapping(ctx context.Context, mapping ManualPo
 // administrator history or allowing LLDP changes to erase manual decisions.
 func (d *Database) DisableManualPortMapping(ctx context.Context, id int64) error {
 	result, err := d.db.ExecContext(ctx, `UPDATE manual_port_mapping
-		SET enabled = 0, disabled_reason = 'user', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-		WHERE id = ? AND enabled = 1`, id)
+		SET enabled = 0, disabled_reason = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+		WHERE id = ? AND enabled = 1`, ManualPortMappingDisabledByUser, id)
 	if err != nil {
 		return fmt.Errorf("disable manual port mapping: %w", err)
 	}
@@ -177,12 +194,16 @@ func (d *Database) DisableManualPortMapping(ctx context.Context, id int64) error
 }
 
 // SupersedeManualPortMappingByLLDP keeps the administrator record as history
-// while releasing its active port/NIC uniqueness reservations.
-func (d *Database) SupersedeManualPortMappingByLLDP(ctx context.Context, id int64) error {
+// while releasing its active port/NIC uniqueness reservations. The reason
+// records whether AUTO confirmed the same relation or won a physical conflict.
+func (d *Database) SupersedeManualPortMappingByLLDP(ctx context.Context, id int64, reason string) error {
+	if !validLLDPDisableReason(reason) {
+		return fmt.Errorf("invalid LLDP manual mapping disable reason %q", reason)
+	}
 	result, err := d.db.ExecContext(ctx, `UPDATE manual_port_mapping
-		SET enabled = 0, disabled_reason = 'lldp_auto',
+		SET enabled = 0, disabled_reason = ?,
 		updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-		WHERE id = ? AND enabled = 1`, id)
+		WHERE id = ? AND enabled = 1`, reason, id)
 	if err != nil {
 		return fmt.Errorf("supersede manual port mapping by LLDP: %w", err)
 	}
@@ -194,6 +215,18 @@ func (d *Database) SupersedeManualPortMappingByLLDP(ctx context.Context, id int6
 		return ErrManualPortMappingNotFound
 	}
 	return nil
+}
+
+func validLLDPDisableReason(reason string) bool {
+	switch reason {
+	case ManualPortMappingDisabledByLLDPMatch,
+		ManualPortMappingDisabledByLLDPPortConflict,
+		ManualPortMappingDisabledByLLDPNICConflict,
+		ManualPortMappingDisabledByLLDPConflict:
+		return true
+	default:
+		return false
+	}
 }
 
 type rowScanner interface {

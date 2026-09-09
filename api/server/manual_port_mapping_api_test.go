@@ -145,6 +145,13 @@ func TestManualPortMappingAPICRUD(t *testing.T) {
 	if deleteRecorder.Code != http.StatusNoContent {
 		t.Fatalf("delete status = %d, body = %s", deleteRecorder.Code, deleteRecorder.Body.String())
 	}
+	inactiveUpdateRequest := authenticatedManualPortMappingRequest(http.MethodPut, "/api/infrastructure/manual-port-mappings/1", body)
+	inactiveUpdateRequest.Request = *mux.SetURLVars(&inactiveUpdateRequest.Request, map[string]string{"id": "1"})
+	inactiveUpdateRecorder := httptest.NewRecorder()
+	fixture.api.update(inactiveUpdateRecorder, inactiveUpdateRequest)
+	if inactiveUpdateRecorder.Code != http.StatusConflict || !strings.Contains(inactiveUpdateRecorder.Body.String(), "이력") {
+		t.Fatalf("inactive update status = %d, body = %s", inactiveUpdateRecorder.Code, inactiveUpdateRecorder.Body.String())
+	}
 
 	active, err := fixture.db.ListManualPortMappings(context.Background(), netdivedb.ManualPortMappingFilter{})
 	if err != nil || len(active) != 0 {
@@ -259,15 +266,130 @@ func TestManualPortMappingReconcilerDisablesMappingWhenLLDPArrives(t *testing.T)
 		t.Fatalf("active mappings after LLDP = %+v, err = %v", active, err)
 	}
 	history, err := fixture.db.ListManualPortMappings(context.Background(), netdivedb.ManualPortMappingFilter{IncludeDisabled: true})
-	if err != nil || len(history) != 1 || history[0].Enabled || history[0].DisabledReason != "lldp_auto" {
+	if err != nil || len(history) != 1 || history[0].Enabled || history[0].DisabledReason != netdivedb.ManualPortMappingDisabledByLLDPPortConflict {
 		t.Fatalf("mapping history after LLDP = %+v, err = %v", history, err)
 	}
 	if err := fixture.db.DisableManualPortMapping(context.Background(), history[0].ID); err != nil {
 		t.Fatal(err)
 	}
 	preserved, err := fixture.db.GetManualPortMapping(context.Background(), history[0].ID)
-	if err != nil || preserved.DisabledReason != "lldp_auto" {
+	if err != nil || preserved.DisabledReason != netdivedb.ManualPortMappingDisabledByLLDPPortConflict {
 		t.Fatalf("LLDP disabled reason after stale delete = %+v, err = %v", preserved, err)
+	}
+}
+
+func TestManualPortMappingLLDPTransitionClassification(t *testing.T) {
+	tests := []struct {
+		name           string
+		manualPortName string
+		manualNICID    string
+		autoPortID     graph.Identifier
+		autoNICID      graph.Identifier
+		want           string
+	}{
+		{
+			name: "matching AUTO relation", manualPortName: "ethernet1", manualNICID: "nic-1",
+			autoPortID: "port-1", autoNICID: "nic-1", want: netdivedb.ManualPortMappingDisabledByLLDPMatch,
+		},
+		{
+			name: "same port points to another NIC", manualPortName: "Ethernet1", manualNICID: "nic-2",
+			autoPortID: "port-1", autoNICID: "nic-1", want: netdivedb.ManualPortMappingDisabledByLLDPPortConflict,
+		},
+		{
+			name: "same NIC appears on another port", manualPortName: "xg7", manualNICID: "nic-1",
+			autoPortID: "port-1", autoNICID: "nic-1", want: netdivedb.ManualPortMappingDisabledByLLDPNICConflict,
+		},
+		{
+			name: "AUTO port still wins after the old manual NIC disappears", manualPortName: "Ethernet1", manualNICID: "missing-nic",
+			autoPortID: "port-1", autoNICID: "nic-1", want: netdivedb.ManualPortMappingDisabledByLLDPPortConflict,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newManualPortMappingAPIFixture(t)
+			port := fixture.graph.GetNode(test.autoPortID)
+			nic := fixture.graph.GetNode(test.autoNICID)
+			if _, err := topology.AddLayer2Link(fixture.graph, port, nic, nil); err != nil {
+				t.Fatal(err)
+			}
+			mapping := netdivedb.ManualPortMapping{
+				SwitchNodeID: "switch-1", SwitchPortName: test.manualPortName,
+				HostNodeID: "host-1", HostNICNodeID: test.manualNICID, Enabled: true,
+			}
+			if got := manualPortMappingLLDPDisableReason(fixture.graph, mapping); got != test.want {
+				t.Fatalf("disable reason = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestManualPortMappingTreatsSwitchToSwitchLLDPPortAsAutomatic(t *testing.T) {
+	fixture := newManualPortMappingAPIFixture(t)
+	peerSwitch, err := fixture.graph.NewNode("switch-2", graph.Metadata{"Type": "switch", "Name": "Switch 2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := fixture.graph.GetNode(graph.Identifier("port-1"))
+	if _, err := topology.AddLayer2Link(fixture.graph, port, peerSwitch, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !hasAutomaticPortName(fixture.graph, fixture.graph.GetNode(graph.Identifier("switch-1")), "ethernet1") {
+		t.Fatal("switch-to-switch LLDP relation must reserve the physical switch port")
+	}
+	mapping := netdivedb.ManualPortMapping{
+		SwitchNodeID: "switch-1", SwitchPortName: "Ethernet1",
+		HostNodeID: "host-1", HostNICNodeID: "nic-1", Enabled: true,
+	}
+	if got := manualPortMappingLLDPDisableReason(fixture.graph, mapping); got != netdivedb.ManualPortMappingDisabledByLLDPPortConflict {
+		t.Fatalf("disable reason = %q, want port conflict", got)
+	}
+}
+
+func TestManualPortMappingReconcilesAndPersistsAcrossAnalyzerRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "netdive.db")
+	cfg := netdivedb.Config{Driver: "sqlite3", Path: path, JournalMode: "WAL", BusyTimeout: 5000}
+	first, err := netdivedb.Open(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.CreateManualPortMapping(context.Background(), netdivedb.ManualPortMapping{
+		SwitchNodeID: "switch-1", SwitchPortName: "Ethernet1",
+		HostNodeID: "host-1", HostNICNodeID: "nic-1", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := netdivedb.Open(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := newManualPortMappingAPIFixture(t)
+	port := fixture.graph.GetNode(graph.Identifier("port-1"))
+	nic := fixture.graph.GetNode(graph.Identifier("nic-1"))
+	if _, err := topology.AddLayer2Link(fixture.graph, port, nic, nil); err != nil {
+		t.Fatal(err)
+	}
+	(&manualPortMappingReconciler{db: second, graph: fixture.graph}).reconcile()
+	if err := second.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	third, err := netdivedb.Open(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer third.Close()
+	active, err := third.ListManualPortMappings(context.Background(), netdivedb.ManualPortMappingFilter{})
+	if err != nil || len(active) != 0 {
+		t.Fatalf("active mappings after analyzer restart = %+v, err = %v", active, err)
+	}
+	history, err := third.ListManualPortMappings(context.Background(), netdivedb.ManualPortMappingFilter{IncludeDisabled: true})
+	if err != nil || len(history) != 1 || history[0].DisabledReason != netdivedb.ManualPortMappingDisabledByLLDPMatch {
+		t.Fatalf("mapping history after analyzer restart = %+v, err = %v", history, err)
 	}
 }
 

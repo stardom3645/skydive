@@ -117,6 +117,50 @@ func TestReopenPreservesDataAndMigrationsAreIdempotent(t *testing.T) {
 	}
 }
 
+func TestReopenPreservesLLDPSupersededMappingHistory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "netdive.db")
+	cfg := testConfig(path)
+
+	first, err := Open(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := first.CreateManualPortMapping(context.Background(), ManualPortMapping{
+		SwitchNodeID: "switch-1", SwitchPortName: "xg7",
+		HostNodeID: "host-1", HostNICNodeID: "nic-1", Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.SupersedeManualPortMappingByLLDP(context.Background(), created.ID, ManualPortMappingDisabledByLLDPMatch); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := Open(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	active, err := second.ListManualPortMappings(context.Background(), ManualPortMappingFilter{})
+	if err != nil || len(active) != 0 {
+		t.Fatalf("active mappings after reopen = %+v, err = %v", active, err)
+	}
+	history, err := second.ListManualPortMappings(context.Background(), ManualPortMappingFilter{IncludeDisabled: true})
+	if err != nil || len(history) != 1 || history[0].Enabled || history[0].DisabledReason != ManualPortMappingDisabledByLLDPMatch {
+		t.Fatalf("mapping history after reopen = %+v, err = %v", history, err)
+	}
+	history[0].Enabled = true
+	if _, err := second.UpdateManualPortMapping(context.Background(), history[0]); !errors.Is(err, ErrManualPortMappingInactive) {
+		t.Fatalf("reactivate superseded mapping error = %v", err)
+	}
+	if err := second.SupersedeManualPortMappingByLLDP(context.Background(), created.ID, "unexpected"); err == nil {
+		t.Fatal("expected an invalid LLDP disable reason to be rejected")
+	}
+}
+
 func TestAdoptsCompatiblePrecreatedTemplateSchema(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "netdive.db")
 	raw, err := sql.Open("sqlite3", path)

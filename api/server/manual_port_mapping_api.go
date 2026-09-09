@@ -52,18 +52,45 @@ func (r *manualPortMappingReconciler) reconcile() {
 		return
 	}
 	for _, mapping := range mappings {
-		switchNode := r.graph.GetNode(graph.Identifier(mapping.SwitchNodeID))
-		hostNIC := r.graph.GetNode(graph.Identifier(mapping.HostNICNodeID))
-		portIsAutomatic := switchNode != nil && hasAutomaticPortName(r.graph, switchNode, mapping.SwitchPortName)
-		nicIsAutomatic := hostNIC != nil && hasAutomaticHostNICRelation(r.graph, hostNIC)
-		if !portIsAutomatic && !nicIsAutomatic {
+		reason := manualPortMappingLLDPDisableReason(r.graph, mapping)
+		if reason == "" {
 			continue
 		}
-		if err := r.db.SupersedeManualPortMappingByLLDP(context.Background(), mapping.ID); err != nil {
+		if err := r.db.SupersedeManualPortMappingByLLDP(context.Background(), mapping.ID, reason); err != nil {
 			logging.GetLogger().Errorf("Failed to supersede manual port mapping %d with LLDP: %s", mapping.ID, err)
 			continue
 		}
-		logging.GetLogger().Infof("Disabled manual port mapping %d because an LLDP automatic relation is now available", mapping.ID)
+		logging.GetLogger().Infof("Disabled manual port mapping %d because an LLDP automatic relation is now available (%s)", mapping.ID, reason)
+	}
+}
+
+// manualPortMappingLLDPDisableReason classifies the AUTO takeover. AUTO always
+// wins, but retaining the distinction between a confirmed relation and a
+// physical endpoint conflict makes the transition auditable after restart.
+func manualPortMappingLLDPDisableReason(g *graph.Graph, mapping netdivedb.ManualPortMapping) string {
+	switchNode := g.GetNode(graph.Identifier(mapping.SwitchNodeID))
+	hostNIC := g.GetNode(graph.Identifier(mapping.HostNICNodeID))
+	automaticNICs := make(map[graph.Identifier]struct{})
+	portConflict := false
+	if switchNode != nil {
+		automaticNICs, portConflict = automaticPortRelationForName(g, switchNode, mapping.SwitchPortName)
+	}
+
+	if hostNIC != nil {
+		if _, exactMatch := automaticNICs[hostNIC.ID]; exactMatch {
+			return netdivedb.ManualPortMappingDisabledByLLDPMatch
+		}
+	}
+	nicConflict := hostNIC != nil && hasAutomaticHostNICRelation(g, hostNIC)
+	switch {
+	case portConflict && nicConflict:
+		return netdivedb.ManualPortMappingDisabledByLLDPConflict
+	case portConflict:
+		return netdivedb.ManualPortMappingDisabledByLLDPPortConflict
+	case nicConflict:
+		return netdivedb.ManualPortMappingDisabledByLLDPNICConflict
+	default:
+		return ""
 	}
 }
 
@@ -273,7 +300,14 @@ func (a *manualPortMappingAPI) mappingFromTopology(request manualPortMappingRequ
 }
 
 func hasAutomaticPortName(g *graph.Graph, switchNode *graph.Node, switchPortName string) bool {
+	_, found := automaticPortRelationForName(g, switchNode, switchPortName)
+	return found
+}
+
+func automaticPortRelationForName(g *graph.Graph, switchNode *graph.Node, switchPortName string) (map[graph.Identifier]struct{}, bool) {
 	wanted := strings.TrimSpace(switchPortName)
+	matches := make(map[graph.Identifier]struct{})
+	found := false
 	queue := g.LookupChildren(switchNode, nil, topology.OwnershipMetadata())
 	visited := make(map[graph.Identifier]struct{})
 	for len(queue) > 0 {
@@ -284,8 +318,20 @@ func hasAutomaticPortName(g *graph.Graph, switchNode *graph.Node, switchPortName
 		}
 		visited[current.ID] = struct{}{}
 		if portType := nodeType(current); (portType == "switchport" || portType == "port") &&
-			strings.EqualFold(topologyPortName(current), wanted) && hasAutomaticPortRelation(g, current) {
-			return true
+			strings.EqualFold(topologyPortName(current), wanted) {
+			for _, edge := range g.GetNodeEdges(current, nil) {
+				relationType, _ := edge.GetFieldString("RelationType")
+				if strings.EqualFold(strings.TrimSpace(relationType), topology.OwnershipLink) {
+					continue
+				}
+				found = true
+				parents, children := g.GetEdgeNodes(edge, nil, nil)
+				for _, peer := range append(parents, children...) {
+					if peer.ID != current.ID && isPhysicalHostNIC(peer) {
+						matches[peer.ID] = struct{}{}
+					}
+				}
+			}
 		}
 		queue = append(queue, g.LookupChildren(current, nil, topology.OwnershipMetadata())...)
 	}
@@ -302,12 +348,13 @@ func hasAutomaticPortName(g *graph.Graph, switchNode *graph.Node, switchPortName
 			if peer.ID == switchNode.ID {
 				continue
 			}
-			if strings.EqualFold(lldpRemotePortName(peer), wanted) {
-				return true
+			if isPhysicalHostNIC(peer) && strings.EqualFold(lldpRemotePortName(peer), wanted) {
+				found = true
+				matches[peer.ID] = struct{}{}
 			}
 		}
 	}
-	return false
+	return matches, found
 }
 
 func topologyPortName(node *graph.Node) string {
@@ -329,19 +376,6 @@ func lldpRemotePortName(node *graph.Node) string {
 		}
 	}
 	return ""
-}
-
-// A switch port with a collected non-ownership edge is already represented by
-// the topology graph and must remain read-only. Manual mappings only supplement
-// ports for which LLDP did not produce a relation.
-func hasAutomaticPortRelation(g *graph.Graph, switchPort *graph.Node) bool {
-	for _, edge := range g.GetNodeEdges(switchPort, nil) {
-		relationType, _ := edge.GetFieldString("RelationType")
-		if !strings.EqualFold(strings.TrimSpace(relationType), topology.OwnershipLink) {
-			return true
-		}
-	}
-	return false
 }
 
 func hasAutomaticHostNICRelation(g *graph.Graph, hostNIC *graph.Node) bool {
@@ -433,6 +467,8 @@ func (a *manualPortMappingAPI) writeDatabaseError(w http.ResponseWriter, err err
 		writeManualPortMappingError(w, http.StatusNotFound, "수동 매핑을 찾을 수 없습니다.")
 	case errors.Is(err, netdivedb.ErrManualPortMappingConflict):
 		writeManualPortMappingError(w, http.StatusConflict, "동일한 스위치 포트명 또는 호스트 NIC에 활성 수동 매핑이 이미 있습니다.")
+	case errors.Is(err, netdivedb.ErrManualPortMappingInactive):
+		writeManualPortMappingError(w, http.StatusConflict, "AUTO 전환 또는 삭제로 비활성화된 수동 매핑 이력은 수정할 수 없습니다.")
 	default:
 		writeManualPortMappingError(w, http.StatusInternalServerError, err.Error())
 	}
