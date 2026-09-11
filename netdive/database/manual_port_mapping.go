@@ -123,6 +123,8 @@ func (d *Database) GetManualPortMapping(ctx context.Context, id int64) (ManualPo
 // CreateManualPortMapping inserts a mapping. Database uniqueness constraints
 // serialize concurrent attempts to assign one active port or NIC twice.
 func (d *Database) CreateManualPortMapping(ctx context.Context, mapping ManualPortMapping) (ManualPortMapping, error) {
+	d.manualMu.Lock()
+	defer d.manualMu.Unlock()
 	result, err := d.db.ExecContext(ctx, `INSERT INTO manual_port_mapping (
 		switch_node_id, switch_name, switch_port_node_id, switch_port_name,
 		host_node_id, host_name, host_nic_node_id, host_nic_name, enabled
@@ -136,13 +138,20 @@ func (d *Database) CreateManualPortMapping(ctx context.Context, mapping ManualPo
 	if err != nil {
 		return ManualPortMapping{}, fmt.Errorf("read created manual port mapping ID: %w", err)
 	}
-	return d.GetManualPortMapping(ctx, id)
+	created, err := d.GetManualPortMapping(ctx, id)
+	if err == nil {
+		d.RecordEvent(manualEvent(created, "manual_mapping_created", "", manualMappingValue(created)))
+	}
+	return created, err
 }
 
 // UpdateManualPortMapping replaces the stable endpoints of an active mapping
 // while preserving its creation timestamp. Disabled rows are immutable audit
 // history and must never be reactivated in place after an AUTO takeover.
 func (d *Database) UpdateManualPortMapping(ctx context.Context, mapping ManualPortMapping) (ManualPortMapping, error) {
+	d.manualMu.Lock()
+	defer d.manualMu.Unlock()
+	previous, previousErr := d.GetManualPortMapping(ctx, mapping.ID)
 	result, err := d.db.ExecContext(ctx, `UPDATE manual_port_mapping SET
 		switch_node_id = ?, switch_name = ?, switch_port_node_id = ?, switch_port_name = ?,
 		host_node_id = ?, host_name = ?, host_nic_node_id = ?, host_nic_name = ?,
@@ -166,12 +175,19 @@ func (d *Database) UpdateManualPortMapping(ctx context.Context, mapping ManualPo
 		}
 		return ManualPortMapping{}, ErrManualPortMappingInactive
 	}
-	return d.GetManualPortMapping(ctx, mapping.ID)
+	updated, err := d.GetManualPortMapping(ctx, mapping.ID)
+	if err == nil && previousErr == nil && manualMappingValue(previous) != manualMappingValue(updated) {
+		d.RecordEvent(manualEvent(updated, "manual_mapping_updated", manualMappingValue(previous), manualMappingValue(updated)))
+	}
+	return updated, err
 }
 
 // DisableManualPortMapping performs the CRUD delete operation without losing
 // administrator history or allowing LLDP changes to erase manual decisions.
 func (d *Database) DisableManualPortMapping(ctx context.Context, id int64) error {
+	d.manualMu.Lock()
+	defer d.manualMu.Unlock()
+	previous, previousErr := d.GetManualPortMapping(ctx, id)
 	result, err := d.db.ExecContext(ctx, `UPDATE manual_port_mapping
 		SET enabled = 0, disabled_reason = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 		WHERE id = ? AND enabled = 1`, ManualPortMappingDisabledByUser, id)
@@ -190,6 +206,9 @@ func (d *Database) DisableManualPortMapping(ctx context.Context, id int64) error
 			return fmt.Errorf("check disabled manual port mapping: %w", err)
 		}
 	}
+	if affected > 0 && previousErr == nil {
+		d.RecordEvent(manualEvent(previous, "manual_mapping_deleted", manualMappingValue(previous), ""))
+	}
 	return nil
 }
 
@@ -197,6 +216,9 @@ func (d *Database) DisableManualPortMapping(ctx context.Context, id int64) error
 // while releasing its active port/NIC uniqueness reservations. The reason
 // records whether AUTO confirmed the same relation or won a physical conflict.
 func (d *Database) SupersedeManualPortMappingByLLDP(ctx context.Context, id int64, reason string) error {
+	d.manualMu.Lock()
+	defer d.manualMu.Unlock()
+	previous, previousErr := d.GetManualPortMapping(ctx, id)
 	if !validLLDPDisableReason(reason) {
 		return fmt.Errorf("invalid LLDP manual mapping disable reason %q", reason)
 	}
@@ -213,6 +235,9 @@ func (d *Database) SupersedeManualPortMappingByLLDP(ctx context.Context, id int6
 	}
 	if affected == 0 {
 		return ErrManualPortMappingNotFound
+	}
+	if previousErr == nil {
+		d.RecordEvent(manualEvent(previous, "manual_mapping_updated", manualMappingValue(previous), reason))
 	}
 	return nil
 }

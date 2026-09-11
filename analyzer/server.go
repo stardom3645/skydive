@@ -96,6 +96,7 @@ type Server struct {
 	etcdClient               *etcdclient.Client
 	localDB                  *netdivedb.Database
 	manualPortMappingCleanup func()
+	eventHistoryCleanup      func()
 }
 
 // GetStatus returns the status of an analyzer
@@ -237,6 +238,9 @@ func (s *Server) Stop() {
 	}
 	if s.manualPortMappingCleanup != nil {
 		s.manualPortMappingCleanup()
+	}
+	if s.eventHistoryCleanup != nil {
+		s.eventHistoryCleanup()
 	}
 
 	if err := s.localDB.Close(); err != nil {
@@ -447,6 +451,7 @@ func NewServerFromConfig() (*Server, error) {
 	api.RegisterMoldHostDetailAPI(httpServer)
 	api.RegisterMoldManagementServerAPI(httpServer)
 	api.RegisterInfrastructureAgentRestartAPI(httpServer, apiAuthBackend)
+	s.eventHistoryCleanup = api.RegisterEventHistoryAPI(httpServer, apiAuthBackend, s.localDB, g)
 	if s.localDB != nil {
 		s.manualPortMappingCleanup = api.RegisterManualPortMappingAPI(httpServer, apiAuthBackend, s.localDB, g)
 	}

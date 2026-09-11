@@ -20,6 +20,7 @@ import (
 	"github.com/skydive-project/skydive/common"
 	"github.com/skydive-project/skydive/config"
 	shttp "github.com/skydive-project/skydive/graffiti/http"
+	netdivedb "github.com/skydive-project/skydive/netdive/database"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -900,7 +901,13 @@ func listMoldKubernetesClusters() ([]moldKubernetesCluster, error) {
 	if err != nil {
 		return nil, err
 	}
-	return parseMoldKubernetesClusters(body)
+	clusters, err := parseMoldKubernetesClusters(body)
+	if err == nil {
+		for _, cluster := range clusters {
+			observeLifecycle(netdivedb.ChangeEvent{ResourceType: "k8s_cluster", ResourceID: cluster.ID, ResourceName: cluster.Name, EventType: "state_changed", NewValue: cluster.State, Source: "mold"})
+		}
+	}
+	return clusters, err
 }
 
 // MoldKubernetesClusterRuntimeStates exposes only the Mold lifecycle state

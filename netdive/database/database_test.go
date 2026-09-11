@@ -73,8 +73,8 @@ func TestOpenCreatesAndMigratesFallbackDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 3 {
-		t.Fatalf("schema version = %d, want 3", version)
+	if version != 4 {
+		t.Fatalf("schema version = %d, want 4", version)
 	}
 }
 
@@ -112,8 +112,8 @@ func TestReopenPreservesDataAndMigrationsAreIdempotent(t *testing.T) {
 	if err := second.SQLDB().QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 3 {
-		t.Fatalf("migration record count = %d, want 3", count)
+	if count != 4 {
+		t.Fatalf("migration record count = %d, want 4", count)
 	}
 }
 
@@ -192,8 +192,8 @@ func TestAdoptsCompatiblePrecreatedTemplateSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 3 {
-		t.Fatalf("schema version = %d, want 3", version)
+	if version != 4 {
+		t.Fatalf("schema version = %d, want 4", version)
 	}
 	var portNodeID sql.NullString
 	var portName string
@@ -252,7 +252,7 @@ func TestMigratesVersionOneDatabaseWithExistingMapping(t *testing.T) {
 	}
 	defer db.Close()
 	version, err := db.SchemaVersion(context.Background())
-	if err != nil || version != 3 {
+	if err != nil || version != 4 {
 		t.Fatalf("schema version = %d, err = %v", version, err)
 	}
 	var portNodeID sql.NullString
@@ -318,7 +318,7 @@ func TestMigratesPreviouslyAppliedVersionTwoDatabase(t *testing.T) {
 	}
 	defer db.Close()
 	version, err := db.SchemaVersion(context.Background())
-	if err != nil || version != 3 {
+	if err != nil || version != 4 {
 		t.Fatalf("schema version = %d, err = %v", version, err)
 	}
 	var disabledReasonColumns int

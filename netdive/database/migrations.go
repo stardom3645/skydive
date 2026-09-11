@@ -9,6 +9,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"github.com/skydive-project/skydive/graffiti/logging"
 )
 
 type migration struct {
@@ -103,6 +104,16 @@ var migrations = []migration{
 	},
 }
 
+func init() {
+	migrations = append(migrations, migration{version: 4, name: "create change event history", statements: []string{
+		`CREATE TABLE event_history (id INTEGER PRIMARY KEY AUTOINCREMENT, resource_type TEXT NOT NULL, resource_id TEXT NOT NULL, resource_name TEXT NOT NULL DEFAULT '', event_type TEXT NOT NULL, old_value TEXT NOT NULL DEFAULT '', new_value TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '', severity TEXT NOT NULL DEFAULT '', metadata TEXT NOT NULL DEFAULT '{}', occurred_at INTEGER NOT NULL)`,
+		`CREATE INDEX ix_event_time ON event_history(occurred_at, id)`,
+		`CREATE INDEX ix_event_resource_type ON event_history(resource_type, occurred_at)`,
+		`CREATE INDEX ix_event_resource_id ON event_history(resource_id, occurred_at)`,
+		`CREATE INDEX ix_event_type ON event_history(event_type, occurred_at)`,
+	}})
+}
+
 func (d *Database) migrate(ctx context.Context) error {
 	if _, err := d.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version INTEGER PRIMARY KEY,
@@ -167,7 +178,11 @@ func (d *Database) applyMigration(ctx context.Context, migration migration) erro
 	); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	logging.GetLogger().Infof("Netdive migration %d applied: %s", migration.version, migration.name)
+	return nil
 }
 
 func validateManualPortMappingSchema(ctx context.Context, tx *sql.Tx) error {

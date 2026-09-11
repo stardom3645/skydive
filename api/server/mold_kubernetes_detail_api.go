@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	netdivedb "github.com/skydive-project/skydive/netdive/database"
 	"net/http"
 	"sort"
 	"strings"
@@ -161,6 +162,10 @@ func setKubernetesCollectionState(clusterID string, status kubernetesAPIConnecti
 		state.LastError = sanitizeKubernetesTestError(err)
 	}
 	kubernetesClientRegistry.states[clusterID] = state
+	// Ignore intermediate request/sync states. These are not collection failures.
+	if status != kubernetesSyncing && status != kubernetesConnected {
+		observeLifecycle(netdivedb.ChangeEvent{ResourceType: "k8s_cluster", ResourceID: clusterID, EventType: "collection_state_changed", NewValue: string(status), Source: "kubernetes"})
+	}
 	kubernetesClientRegistry.Unlock()
 }
 

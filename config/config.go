@@ -214,6 +214,7 @@ func init() {
 	cfg.SetDefault("custom.database.path", "/usr/share/ablestack/ablestack-netdive/netdive.db")
 	cfg.SetDefault("custom.database.journalMode", "WAL")
 	cfg.SetDefault("custom.database.busyTimeout", 5000)
+	cfg.SetDefault("custom.database.eventHistoryRetentionDays", 30)
 
 	cfg.SetDefault("ovs.ovsdb", "unix:///var/run/openvswitch/db.sock")
 	cfg.SetDefault("ovs.oflow.enable", false)

@@ -132,6 +132,7 @@ type HostDev struct {
 
 // Domain is the subset of XML coding of a domain in libvirt
 type Domain struct {
+	UUID        string      `xml:"uuid"`
 	Interfaces  []Interface `xml:"devices>interface"`
 	HostDevices []HostDev   `xml:"devices>hostdev"`
 }
@@ -152,6 +153,11 @@ func (probe *Probe) getDomainInterfaces(
 	if err = xml.Unmarshal(rawXML, &d); err != nil {
 		probe.Ctx.Logger.Errorf("XML parsing error: %s", err)
 		return
+	}
+	if d.UUID != "" && domainNode != nil {
+		probe.Ctx.Graph.Lock()
+		probe.Ctx.Graph.AddMetadata(domainNode, "UUID", d.UUID)
+		probe.Ctx.Graph.Unlock()
 	}
 
 	for _, itf := range d.Interfaces {

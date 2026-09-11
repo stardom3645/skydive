@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 
 	_ "github.com/mattn/go-sqlite3"
 
@@ -29,27 +30,31 @@ const sqliteDriver = "sqlite3"
 
 // Config describes Netdive's local database settings.
 type Config struct {
-	Driver      string
-	Path        string
-	JournalMode string
-	BusyTimeout int
+	Driver                    string
+	Path                      string
+	JournalMode               string
+	BusyTimeout               int
+	EventHistoryRetentionDays int
 }
 
 // Database is the common access point for Netdive's local persistent data.
 // Later manual-mapping repositories should share this handle rather than open
 // feature-specific connections.
 type Database struct {
-	db   *sql.DB
-	path string
+	db       *sql.DB
+	path     string
+	events   *eventWriter
+	manualMu sync.Mutex
 }
 
 // ConfigFromGlobal reads the ABLESTACK-specific custom.database section.
 func ConfigFromGlobal() Config {
 	return Config{
-		Driver:      config.GetString("custom.database.driver"),
-		Path:        config.GetString("custom.database.path"),
-		JournalMode: config.GetString("custom.database.journalMode"),
-		BusyTimeout: config.GetInt("custom.database.busyTimeout"),
+		Driver:                    config.GetString("custom.database.driver"),
+		Path:                      config.GetString("custom.database.path"),
+		JournalMode:               config.GetString("custom.database.journalMode"),
+		BusyTimeout:               config.GetInt("custom.database.busyTimeout"),
+		EventHistoryRetentionDays: config.GetInt("custom.database.eventHistoryRetentionDays"),
 	}
 }
 
@@ -122,6 +127,7 @@ func Open(ctx context.Context, cfg Config) (*Database, error) {
 	}
 	logging.GetLogger().Infof("Netdive database %q opened at schema version %d", cfg.Path, version)
 
+	db.events = newEventWriter(db, cfg.EventHistoryRetentionDays)
 	return db, nil
 }
 
@@ -166,6 +172,9 @@ func (d *Database) SchemaVersion(ctx context.Context) (int, error) {
 func (d *Database) Close() error {
 	if d == nil || d.db == nil {
 		return nil
+	}
+	if d.events != nil {
+		d.events.close()
 	}
 	return d.db.Close()
 }
