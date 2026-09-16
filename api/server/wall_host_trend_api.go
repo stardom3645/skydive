@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	defaultWallPrometheusURL = "http://127.0.0.1:3001"
+	defaultWallPrometheusURL = "http://ccvm:3001"
 	defaultTrendRange        = 3 * time.Hour
 	defaultTrendStep         = 60 * time.Second
 )
@@ -454,12 +454,6 @@ func lastTrendValue(points []wallHostTrendPoint) *float64 {
 }
 
 func wallPrometheusURL() string {
-	for _, key := range []string{"NETDIVE_WALL_PROMETHEUS_URL", "WALL_PROMETHEUS_URL", "PROMETHEUS_URL"} {
-		value := strings.TrimSpace(os.Getenv(key))
-		if value != "" {
-			return strings.TrimRight(value, "/")
-		}
-	}
 	return defaultWallPrometheusURL
 }
 
