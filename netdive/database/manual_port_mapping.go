@@ -237,7 +237,10 @@ func (d *Database) SupersedeManualPortMappingByLLDP(ctx context.Context, id int6
 		return ErrManualPortMappingNotFound
 	}
 	if previousErr == nil {
-		d.RecordEvent(manualEvent(previous, "manual_mapping_updated", manualMappingValue(previous), reason))
+		event := manualEvent(previous, "manual_mapping_superseded", manualMappingValue(previous), reason)
+		event.Source = "lldp"
+		event.Severity = "warning"
+		d.RecordEvent(event)
 	}
 	return nil
 }

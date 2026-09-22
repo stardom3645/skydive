@@ -225,7 +225,12 @@ func (w *eventWriter) close() {
 }
 
 func manualEvent(m ManualPortMapping, kind, oldValue, newValue string) ChangeEvent {
-	metadata, _ := json.Marshal(map[string]interface{}{"mappingId": m.ID, "portNodeId": m.SwitchPortNodeID, "switchNodeId": m.SwitchNodeID})
+	metadata, _ := json.Marshal(map[string]interface{}{
+		"mappingId": m.ID, "portNodeId": m.SwitchPortNodeID, "switchNodeId": m.SwitchNodeID,
+		"switchName": m.SwitchName, "switchPortName": m.SwitchPortName,
+		"hostNodeId": m.HostNodeID, "hostName": m.HostName,
+		"hostNicNodeId": m.HostNICNodeID, "hostNicName": m.HostNICName,
+	})
 	return ChangeEvent{ResourceType: "switchport", ResourceID: fmt.Sprintf("manual-mapping:%d", m.ID), ResourceName: m.SwitchPortName, EventType: kind, OldValue: oldValue, NewValue: newValue, Source: "manual", Metadata: string(metadata)}
 }
 

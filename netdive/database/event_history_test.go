@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -71,6 +72,35 @@ func TestManualEventsExactlyOnceAndPersistence(t *testing.T) {
 	page, err = reopened.ListEvents(ctx, EventFilter{})
 	if err != nil || page.Total != 3 {
 		t.Fatal(page, err)
+	}
+}
+
+func TestLLDPSupersedeRecordsExplicitEvent(t *testing.T) {
+	d := historyDB(t)
+	ctx := context.Background()
+	mapping, err := d.CreateManualPortMapping(ctx, ManualPortMapping{
+		SwitchNodeID: "switch", SwitchName: "switch-a", SwitchPortName: "xg5",
+		HostNodeID: "host", HostName: "host-a", HostNICNodeID: "nic", HostNICName: "eno1", Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = d.SupersedeManualPortMappingByLLDP(ctx, mapping.ID, ManualPortMappingDisabledByLLDPNICConflict); err != nil {
+		t.Fatal(err)
+	}
+	d.events.close()
+	page, err := d.ListEvents(ctx, EventFilter{EventType: "manual_mapping_superseded"})
+	if err != nil || page.Total != 1 {
+		t.Fatalf("LLDP supersede events: %+v, %v", page, err)
+	}
+	event := page.Events[0]
+	if event.Source != "lldp" || event.Severity != "warning" || event.NewValue != ManualPortMappingDisabledByLLDPNICConflict {
+		t.Fatalf("LLDP supersede event: %+v", event)
+	}
+	for _, expected := range []string{`"switchName":"switch-a"`, `"hostName":"host-a"`, `"hostNicName":"eno1"`} {
+		if !strings.Contains(event.Metadata, expected) {
+			t.Fatalf("LLDP supersede metadata %q does not contain %q", event.Metadata, expected)
+		}
 	}
 }
 
