@@ -20,6 +20,11 @@ var (
 	moldAPICredentialsStore MoldCredentialsStore
 )
 
+var (
+	ErrMoldAPICredentialsNotConfigured = errors.New("Mold API credentials are not configured")
+	ErrMoldDBPasswordNotConfigured     = errors.New("Mold database password is not configured")
+)
+
 // MoldCredentialsStore is implemented by Netdive's encrypted local SQLite
 // credential repository. A nil store preserves the legacy secret-file mode.
 type MoldCredentialsStore interface {
@@ -27,6 +32,7 @@ type MoldCredentialsStore interface {
 	SaveMoldAPICredentials(context.Context, string, string) error
 	LoadMoldDBPassword(context.Context) (string, bool, error)
 	SaveMoldDBPassword(context.Context, string) error
+	SaveMoldCredentials(context.Context, string, string, string) error
 }
 
 // SetMoldAPICredentialsStore selects encrypted SQLite storage for Mold API
@@ -38,11 +44,10 @@ func SetMoldAPICredentialsStore(store MoldCredentialsStore) {
 }
 
 type MoldDBConfig struct {
-	Host         string
-	Port         int
-	Name         string
-	User         string
-	PasswordFile string
+	Host string
+	Port int
+	Name string
+	User string
 }
 
 type MoldAPIConfig struct {
@@ -114,6 +119,7 @@ func ReadMoldAPIKeys() (string, string, error) {
 		if configured {
 			return apiKey, secretKey, nil
 		}
+		return "", "", ErrMoldAPICredentialsNotConfigured
 	}
 
 	apiCfg := GetMoldAPIConfig()
@@ -148,29 +154,41 @@ func WriteMoldAPIKeys(apiKey, secretKey string) error {
 	return writeMoldAPIKeys(apiCfg.APIKeyFile, apiCfg.SecretKeyFile, apiKey, secretKey)
 }
 
-// SeedMoldDBPassword imports the existing plaintext password file only when
-// the encrypted SQLite store does not have a database password yet.
-func SeedMoldDBPassword() error {
+// MoldCredentialsConfigured reports which encrypted values exist without
+// exposing them.
+func MoldCredentialsConfigured() (bool, bool, error) {
 	moldAPIKeysMu.RLock()
 	store := moldAPICredentialsStore
 	moldAPIKeysMu.RUnlock()
 	if store == nil {
-		return nil
+		_, _, apiErr := ReadMoldAPIKeys()
+		_, dbErr := ReadMoldDBPassword()
+		return apiErr == nil, dbErr == nil, nil
 	}
-	_, configured, err := store.LoadMoldDBPassword(context.Background())
-	if err != nil || configured {
-		return err
-	}
-	dbCfg := GetMoldDBConfig()
-	password, err := readSecretFile(dbCfg.PasswordFile, "mold.db.passwordFile")
+	_, _, apiConfigured, err := store.LoadMoldAPICredentials(context.Background())
 	if err != nil {
-		return err
+		return false, false, err
 	}
-	return store.SaveMoldDBPassword(context.Background(), password)
+	_, dbConfigured, err := store.LoadMoldDBPassword(context.Background())
+	if err != nil {
+		return false, false, err
+	}
+	return apiConfigured, dbConfigured, nil
 }
 
-// ReadMoldDBPassword uses the encrypted SQLite value first and keeps the old
-// password file as a bootstrap/fallback for deployments without the local DB.
+// WriteMoldCredentials stores all values in one encrypted SQLite payload. An
+// empty database password preserves the previously stored value.
+func WriteMoldCredentials(apiKey, secretKey, dbPassword string) error {
+	moldAPIKeysMu.RLock()
+	store := moldAPICredentialsStore
+	moldAPIKeysMu.RUnlock()
+	if store == nil {
+		return fmt.Errorf("encrypted Netdive credential store is not available")
+	}
+	return store.SaveMoldCredentials(context.Background(), apiKey, secretKey, dbPassword)
+}
+
+// ReadMoldDBPassword reads only from Netdive's encrypted SQLite store.
 func ReadMoldDBPassword() (string, error) {
 	moldAPIKeysMu.RLock()
 	store := moldAPICredentialsStore
@@ -183,9 +201,9 @@ func ReadMoldDBPassword() (string, error) {
 		if configured {
 			return password, nil
 		}
+		return "", ErrMoldDBPasswordNotConfigured
 	}
-	dbCfg := GetMoldDBConfig()
-	return readSecretFile(dbCfg.PasswordFile, "mold.db.passwordFile")
+	return "", fmt.Errorf("encrypted Netdive credential store is not available")
 }
 
 func writeMoldAPIKeys(apiKeyPath, secretKeyPath, apiKey, secretKey string) error {
@@ -258,11 +276,10 @@ func stageSecretFile(path, value string) (string, error) {
 
 func GetMoldDBConfig() MoldDBConfig {
 	return MoldDBConfig{
-		Host:         config.GetString("mold.db.host"),
-		Port:         config.GetInt("mold.db.port"),
-		Name:         config.GetString("mold.db.name"),
-		User:         config.GetString("mold.db.user"),
-		PasswordFile: config.GetString("mold.db.passwordFile"),
+		Host: config.GetString("mold.db.host"),
+		Port: config.GetInt("mold.db.port"),
+		Name: config.GetString("mold.db.name"),
+		User: config.GetString("mold.db.user"),
 	}
 }
 

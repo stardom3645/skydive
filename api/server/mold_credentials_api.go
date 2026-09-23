@@ -23,13 +23,16 @@ const (
 )
 
 type moldCredentialsRequest struct {
-	APIKey    string `json:"apiKey"`
-	SecretKey string `json:"secretKey"`
+	APIKey     string `json:"apiKey"`
+	SecretKey  string `json:"secretKey"`
+	DBPassword string `json:"dbPassword"`
 }
 
 type moldCredentialsStatus struct {
-	Configured bool   `json:"configured"`
-	Message    string `json:"message,omitempty"`
+	Configured           bool   `json:"configured"`
+	APIConfigured        bool   `json:"apiConfigured"`
+	DBPasswordConfigured bool   `json:"dbPasswordConfigured"`
+	Message              string `json:"message,omitempty"`
 }
 
 func writeMoldCredentialsJSON(w http.ResponseWriter, status int, payload interface{}) {
@@ -49,10 +52,11 @@ func decodeMoldCredentialsRequest(w http.ResponseWriter, r *auth.AuthenticatedRe
 	}
 	request.APIKey = strings.TrimSpace(request.APIKey)
 	request.SecretKey = strings.TrimSpace(request.SecretKey)
+	request.DBPassword = strings.TrimSpace(request.DBPassword)
 	if request.APIKey == "" || request.SecretKey == "" {
 		return request, errors.New("API Key와 Secret Key를 모두 입력해 주세요.")
 	}
-	if len(request.APIKey) > maxCredentialLength || len(request.SecretKey) > maxCredentialLength {
+	if len(request.APIKey) > maxCredentialLength || len(request.SecretKey) > maxCredentialLength || len(request.DBPassword) > maxCredentialLength {
 		return request, errors.New("입력한 키가 허용된 길이를 초과했습니다.")
 	}
 	return request, nil
@@ -86,17 +90,14 @@ func handleMoldCredentialsGet(w http.ResponseWriter, r *auth.AuthenticatedReques
 		writeMoldCredentialsJSON(w, http.StatusForbidden, moldCredentialsStatus{Message: "관리 권한이 필요합니다."})
 		return
 	}
-	_, _, err := common.ReadMoldAPIKeys()
-	if err == nil {
-		writeMoldCredentialsJSON(w, http.StatusOK, moldCredentialsStatus{Configured: true})
+	apiConfigured, dbConfigured, err := common.MoldCredentialsConfigured()
+	if err != nil {
+		writeMoldCredentialsJSON(w, http.StatusInternalServerError, moldCredentialsStatus{Message: "저장된 연동 정보를 확인할 수 없습니다."})
 		return
 	}
-	secretErr := &common.SecretFileError{}
-	if errors.As(err, &secretErr) && (secretErr.Reason == common.SecretFileMissing || secretErr.Reason == common.SecretFileEmpty) {
-		writeMoldCredentialsJSON(w, http.StatusOK, moldCredentialsStatus{Configured: false})
-		return
-	}
-	writeMoldCredentialsJSON(w, http.StatusInternalServerError, moldCredentialsStatus{Message: "저장된 연동 정보를 확인할 수 없습니다."})
+	writeMoldCredentialsJSON(w, http.StatusOK, moldCredentialsStatus{
+		Configured: apiConfigured && dbConfigured, APIConfigured: apiConfigured, DBPasswordConfigured: dbConfigured,
+	})
 }
 
 func handleMoldCredentialsTest(w http.ResponseWriter, r *auth.AuthenticatedRequest) {
@@ -130,11 +131,23 @@ func handleMoldCredentialsPut(w http.ResponseWriter, r *auth.AuthenticatedReques
 		writeMoldCredentialsJSON(w, moldCredentialsErrorStatus(err), moldCredentialsStatus{Message: err.Error()})
 		return
 	}
-	if err := common.WriteMoldAPIKeys(request.APIKey, request.SecretKey); err != nil {
+	_, dbConfigured, err := common.MoldCredentialsConfigured()
+	if err != nil {
+		writeMoldCredentialsJSON(w, http.StatusInternalServerError, moldCredentialsStatus{Message: "저장된 연동 정보를 확인할 수 없습니다."})
+		return
+	}
+	if request.DBPassword == "" && !dbConfigured {
+		writeMoldCredentialsJSON(w, http.StatusBadRequest, moldCredentialsStatus{Message: "Mold DB 비밀번호를 입력해 주세요."})
+		return
+	}
+	if err := common.WriteMoldCredentials(request.APIKey, request.SecretKey, request.DBPassword); err != nil {
 		writeMoldCredentialsJSON(w, http.StatusInternalServerError, moldCredentialsStatus{Message: "연동 정보를 저장하지 못했습니다."})
 		return
 	}
-	writeMoldCredentialsJSON(w, http.StatusOK, moldCredentialsStatus{Configured: true, Message: "Mold API 연동 정보를 저장했습니다."})
+	writeMoldCredentialsJSON(w, http.StatusOK, moldCredentialsStatus{
+		Configured: true, APIConfigured: true, DBPasswordConfigured: true,
+		Message: "Mold 연동 정보를 암호화하여 저장했습니다.",
+	})
 }
 
 // RegisterMoldCredentialsAPI registers authenticated endpoints for testing and

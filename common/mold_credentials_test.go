@@ -8,8 +8,8 @@ import (
 )
 
 type testMoldCredentialsStore struct {
-	apiKey, secretKey string
-	configured        bool
+	apiKey, secretKey, dbPassword string
+	configured                    bool
 }
 
 func (s *testMoldCredentialsStore) LoadMoldAPICredentials(context.Context) (string, string, bool, error) {
@@ -18,6 +18,23 @@ func (s *testMoldCredentialsStore) LoadMoldAPICredentials(context.Context) (stri
 
 func (s *testMoldCredentialsStore) SaveMoldAPICredentials(_ context.Context, apiKey, secretKey string) error {
 	s.apiKey, s.secretKey, s.configured = apiKey, secretKey, true
+	return nil
+}
+
+func (s *testMoldCredentialsStore) LoadMoldDBPassword(context.Context) (string, bool, error) {
+	return s.dbPassword, s.dbPassword != "", nil
+}
+
+func (s *testMoldCredentialsStore) SaveMoldDBPassword(_ context.Context, password string) error {
+	s.dbPassword = password
+	return nil
+}
+
+func (s *testMoldCredentialsStore) SaveMoldCredentials(_ context.Context, apiKey, secretKey, dbPassword string) error {
+	s.apiKey, s.secretKey, s.configured = apiKey, secretKey, true
+	if dbPassword != "" {
+		s.dbPassword = dbPassword
+	}
 	return nil
 }
 
@@ -73,5 +90,23 @@ func TestMoldAPIKeysUseConfiguredStore(t *testing.T) {
 	}
 	if apiKey != "api-value" || secretKey != "secret-value" {
 		t.Fatalf("stored credentials = %q/%q", apiKey, secretKey)
+	}
+}
+
+func TestWriteMoldCredentialsStoresDBPassword(t *testing.T) {
+	store := &testMoldCredentialsStore{}
+	SetMoldAPICredentialsStore(store)
+	t.Cleanup(func() { SetMoldAPICredentialsStore(nil) })
+
+	if err := WriteMoldCredentials("api-value", "secret-value", "db-password"); err != nil {
+		t.Fatal(err)
+	}
+	apiConfigured, dbConfigured, err := MoldCredentialsConfigured()
+	if err != nil || !apiConfigured || !dbConfigured {
+		t.Fatalf("configured status = api:%v db:%v err:%v", apiConfigured, dbConfigured, err)
+	}
+	password, err := ReadMoldDBPassword()
+	if err != nil || password != "db-password" {
+		t.Fatalf("DB password = %q, err=%v", password, err)
 	}
 }

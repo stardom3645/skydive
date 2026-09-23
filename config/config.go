@@ -198,7 +198,6 @@ func init() {
 	cfg.SetDefault("mold.db.port", 3306)
 	cfg.SetDefault("mold.db.name", "cloud")
 	cfg.SetDefault("mold.db.user", "cloud")
-	cfg.SetDefault("mold.db.passwordFile", "/etc/skydive/secrets/mold-db-password")
 	cfg.SetDefault("mold.vmNameMap.refreshInterval", 10)
 	cfg.SetDefault("mold.vmNetworkMap.refreshInterval", 10)
 	cfg.SetDefault("mold.kubernetes.kubeconfigPath", "/usr/share/ablestack/ablestack-netdive/kubeconfigs/selected.kubeconfig")

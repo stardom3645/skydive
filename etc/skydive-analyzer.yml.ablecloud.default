@@ -38,14 +38,11 @@ mold:
     stateFile: "/usr/share/ablestack/ablestack-netdive/kubeconfigs/selected-cluster.json"
   api:
     endpoint: "http://ccvm:8080/client/api"
-    apiKeyFile: "/usr/share/ablestack/ablestack-netdive/secrets/mold-api-key"
-    secretKeyFile: "/usr/share/ablestack/ablestack-netdive/secrets/mold-secret-key"
   db:
-    host: "127.0.0.1"
+    host: "ccvm"
     port: 3306
     name: "cloud"
     user: "cloud"
-    passwordFile: "/usr/share/ablestack/ablestack-netdive/secrets/mold-db-password"
 
 custom:
   database:

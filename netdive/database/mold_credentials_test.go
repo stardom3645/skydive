@@ -24,7 +24,8 @@ func TestMoldAPICredentialsEncryptedRoundTrip(t *testing.T) {
 
 	apiKey := "api-key-must-not-appear-in-sqlite"
 	secretKey := "secret-key-must-not-appear-in-sqlite"
-	if err := db.SaveMoldAPICredentials(context.Background(), apiKey, secretKey); err != nil {
+	dbPassword := "db-password-must-not-appear-in-sqlite"
+	if err := db.SaveMoldCredentials(context.Background(), apiKey, secretKey, dbPassword); err != nil {
 		t.Fatal(err)
 	}
 	gotAPI, gotSecret, configured, err := db.LoadMoldAPICredentials(context.Background())
@@ -34,12 +35,16 @@ func TestMoldAPICredentialsEncryptedRoundTrip(t *testing.T) {
 	if !configured || gotAPI != apiKey || gotSecret != secretKey {
 		t.Fatalf("unexpected credential round trip: configured=%v api=%q secret=%q", configured, gotAPI, gotSecret)
 	}
+	gotPassword, passwordConfigured, err := db.LoadMoldDBPassword(context.Background())
+	if err != nil || !passwordConfigured || gotPassword != dbPassword {
+		t.Fatalf("unexpected DB password round trip: configured=%v password=%q err=%v", passwordConfigured, gotPassword, err)
+	}
 
 	var nonce, ciphertext []byte
 	if err := db.SQLDB().QueryRow("SELECT nonce, ciphertext FROM mold_api_credentials WHERE id = 1").Scan(&nonce, &ciphertext); err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(ciphertext, []byte(apiKey)) || bytes.Contains(ciphertext, []byte(secretKey)) {
+	if bytes.Contains(ciphertext, []byte(apiKey)) || bytes.Contains(ciphertext, []byte(secretKey)) || bytes.Contains(ciphertext, []byte(dbPassword)) {
 		t.Fatal("SQLite ciphertext contains a plaintext credential")
 	}
 	if len(nonce) != 12 {
@@ -52,6 +57,14 @@ func TestMoldAPICredentialsEncryptedRoundTrip(t *testing.T) {
 	}
 	if keyInfo.Mode().Perm() != 0600 {
 		t.Fatalf("credential key permissions = %o, want 600", keyInfo.Mode().Perm())
+	}
+
+	if err := db.SaveMoldAPICredentials(context.Background(), "new-api", "new-secret"); err != nil {
+		t.Fatal(err)
+	}
+	gotPassword, passwordConfigured, err = db.LoadMoldDBPassword(context.Background())
+	if err != nil || !passwordConfigured || gotPassword != dbPassword {
+		t.Fatalf("API-only update replaced DB password: configured=%v password=%q err=%v", passwordConfigured, gotPassword, err)
 	}
 }
 
@@ -67,7 +80,7 @@ func TestMoldAPICredentialsMissingAndTampered(t *testing.T) {
 	if err != nil || configured {
 		t.Fatalf("empty credentials: configured=%v err=%v", configured, err)
 	}
-	if err := db.SaveMoldAPICredentials(context.Background(), "api", "secret"); err != nil {
+	if err := db.SaveMoldCredentials(context.Background(), "api", "secret", "db-password"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.SQLDB().Exec("UPDATE mold_api_credentials SET ciphertext = randomblob(length(ciphertext)) WHERE id = 1"); err != nil {
