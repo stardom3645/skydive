@@ -53,3 +53,4 @@ custom:
     path: "/usr/share/ablestack/ablestack-netdive/netdive.db"
     journalMode: "WAL"
     busyTimeout: 5000
+    credentialKeyFile: "/usr/share/ablestack/ablestack-netdive/secrets/netdive-credential-key"

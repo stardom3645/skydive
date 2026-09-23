@@ -17,10 +17,11 @@ import (
 
 func testConfig(path string) Config {
 	return Config{
-		Driver:      "sqlite3",
-		Path:        path,
-		JournalMode: "WAL",
-		BusyTimeout: 3210,
+		Driver:            "sqlite3",
+		Path:              path,
+		JournalMode:       "WAL",
+		BusyTimeout:       3210,
+		CredentialKeyFile: filepath.Join(filepath.Dir(path), "netdive-credential-key"),
 	}
 }
 
@@ -32,15 +33,17 @@ func TestConfigFromGlobal(t *testing.T) {
 		global.Set("custom.database.path", old.Path)
 		global.Set("custom.database.journalMode", old.JournalMode)
 		global.Set("custom.database.busyTimeout", old.BusyTimeout)
+		global.Set("custom.database.credentialKeyFile", old.CredentialKeyFile)
 	}()
 
 	global.Set("custom.database.driver", "sqlite3")
 	global.Set("custom.database.path", "/tmp/configured-netdive.db")
 	global.Set("custom.database.journalMode", "WAL")
 	global.Set("custom.database.busyTimeout", 4321)
+	global.Set("custom.database.credentialKeyFile", "/tmp/netdive-credential-key")
 
 	got := ConfigFromGlobal()
-	if got.Driver != "sqlite3" || got.Path != "/tmp/configured-netdive.db" || got.JournalMode != "WAL" || got.BusyTimeout != 4321 {
+	if got.Driver != "sqlite3" || got.Path != "/tmp/configured-netdive.db" || got.JournalMode != "WAL" || got.BusyTimeout != 4321 || got.CredentialKeyFile != "/tmp/netdive-credential-key" {
 		t.Fatalf("unexpected custom.database config: %+v", got)
 	}
 }
@@ -73,8 +76,8 @@ func TestOpenCreatesAndMigratesFallbackDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 4 {
-		t.Fatalf("schema version = %d, want 4", version)
+	if version != 5 {
+		t.Fatalf("schema version = %d, want 5", version)
 	}
 }
 
@@ -112,8 +115,8 @@ func TestReopenPreservesDataAndMigrationsAreIdempotent(t *testing.T) {
 	if err := second.SQLDB().QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 4 {
-		t.Fatalf("migration record count = %d, want 4", count)
+	if count != 5 {
+		t.Fatalf("migration record count = %d, want 5", count)
 	}
 }
 
@@ -192,8 +195,8 @@ func TestAdoptsCompatiblePrecreatedTemplateSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 4 {
-		t.Fatalf("schema version = %d, want 4", version)
+	if version != 5 {
+		t.Fatalf("schema version = %d, want 5", version)
 	}
 	var portNodeID sql.NullString
 	var portName string
@@ -252,7 +255,7 @@ func TestMigratesVersionOneDatabaseWithExistingMapping(t *testing.T) {
 	}
 	defer db.Close()
 	version, err := db.SchemaVersion(context.Background())
-	if err != nil || version != 4 {
+	if err != nil || version != 5 {
 		t.Fatalf("schema version = %d, err = %v", version, err)
 	}
 	var portNodeID sql.NullString
@@ -318,7 +321,7 @@ func TestMigratesPreviouslyAppliedVersionTwoDatabase(t *testing.T) {
 	}
 	defer db.Close()
 	version, err := db.SchemaVersion(context.Background())
-	if err != nil || version != 4 {
+	if err != nil || version != 5 {
 		t.Fatalf("schema version = %d, err = %v", version, err)
 	}
 	var disabledReasonColumns int
@@ -478,6 +481,7 @@ func assertSchema(t *testing.T, db *sql.DB) {
 	for _, object := range []string{
 		"schema_migrations",
 		"manual_port_mapping",
+		"mold_api_credentials",
 		"ux_manual_port_mapping_active_switch_port_name",
 		"ux_manual_port_mapping_active_host_nic",
 		"ix_manual_port_mapping_switch",

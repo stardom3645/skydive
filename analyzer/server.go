@@ -243,6 +243,7 @@ func (s *Server) Stop() {
 		s.eventHistoryCleanup()
 	}
 
+	common.SetMoldAPICredentialsStore(nil)
 	if err := s.localDB.Close(); err != nil {
 		logging.GetLogger().Errorf("Failed to close Netdive database: %s", err)
 	}
@@ -327,9 +328,13 @@ func NewServerFromConfig() (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	if localDB != nil {
+		common.SetMoldAPICredentialsStore(localDB)
+	}
 	keepLocalDB := false
 	defer func() {
 		if !keepLocalDB {
+			common.SetMoldAPICredentialsStore(nil)
 			localDB.Close()
 		}
 	}()
@@ -447,6 +452,7 @@ func NewServerFromConfig() (*Server, error) {
 	api.RegisterVMNetworkMapAPI(httpServer, common.GetVMNetworkMap, vmNetworkRefreshInterval)
 	api.RegisterVMDetailMapAPI(httpServer, common.GetVMDetailMap, vmNetworkRefreshInterval)
 	api.RegisterMoldVMConsoleAPI(httpServer)
+	api.RegisterMoldCredentialsAPI(httpServer, apiAuthBackend)
 	api.RegisterMoldKubernetesAPI(httpServer, startMoldKubernetesProbe(g, probeBundle), stopMoldKubernetesProbe(probeBundle), isMoldKubernetesProbeRunning(probeBundle))
 	api.RegisterMoldHostDetailAPI(httpServer)
 	api.RegisterMoldManagementServerAPI(httpServer)

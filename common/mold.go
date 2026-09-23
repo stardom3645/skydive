@@ -1,16 +1,41 @@
 package common
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 
 	_ "github.com/go-sql-driver/mysql"
 
 	"github.com/skydive-project/skydive/config"
 )
+
+var (
+	moldAPIKeysMu           sync.RWMutex
+	moldAPICredentialsStore MoldCredentialsStore
+)
+
+// MoldCredentialsStore is implemented by Netdive's encrypted local SQLite
+// credential repository. A nil store preserves the legacy secret-file mode.
+type MoldCredentialsStore interface {
+	LoadMoldAPICredentials(context.Context) (string, string, bool, error)
+	SaveMoldAPICredentials(context.Context, string, string) error
+	LoadMoldDBPassword(context.Context) (string, bool, error)
+	SaveMoldDBPassword(context.Context, string) error
+}
+
+// SetMoldAPICredentialsStore selects encrypted SQLite storage for Mold API
+// credentials. It is configured by the analyzer after opening its local DB.
+func SetMoldAPICredentialsStore(store MoldCredentialsStore) {
+	moldAPIKeysMu.Lock()
+	defer moldAPIKeysMu.Unlock()
+	moldAPICredentialsStore = store
+}
 
 type MoldDBConfig struct {
 	Host         string
@@ -77,6 +102,20 @@ func GetMoldAPIConfig() MoldAPIConfig {
 }
 
 func ReadMoldAPIKeys() (string, string, error) {
+	moldAPIKeysMu.RLock()
+	store := moldAPICredentialsStore
+	moldAPIKeysMu.RUnlock()
+
+	if store != nil {
+		apiKey, secretKey, configured, err := store.LoadMoldAPICredentials(context.Background())
+		if err != nil {
+			return "", "", err
+		}
+		if configured {
+			return apiKey, secretKey, nil
+		}
+	}
+
 	apiCfg := GetMoldAPIConfig()
 	apiKey, err := readSecretFile(apiCfg.APIKeyFile, "mold.api.apiKeyFile")
 	if err != nil {
@@ -87,6 +126,134 @@ func ReadMoldAPIKeys() (string, string, error) {
 		return "", "", err
 	}
 	return apiKey, secretKey, nil
+}
+
+// WriteMoldAPIKeys replaces the configured Mold credentials without exposing
+// them through the application configuration or requiring an analyzer restart.
+func WriteMoldAPIKeys(apiKey, secretKey string) error {
+	apiKey = strings.TrimSpace(apiKey)
+	secretKey = strings.TrimSpace(secretKey)
+	if apiKey == "" || secretKey == "" {
+		return fmt.Errorf("Mold API credentials must not be empty")
+	}
+
+	moldAPIKeysMu.RLock()
+	store := moldAPICredentialsStore
+	moldAPIKeysMu.RUnlock()
+	if store != nil {
+		return store.SaveMoldAPICredentials(context.Background(), apiKey, secretKey)
+	}
+
+	apiCfg := GetMoldAPIConfig()
+	return writeMoldAPIKeys(apiCfg.APIKeyFile, apiCfg.SecretKeyFile, apiKey, secretKey)
+}
+
+// SeedMoldDBPassword imports the existing plaintext password file only when
+// the encrypted SQLite store does not have a database password yet.
+func SeedMoldDBPassword() error {
+	moldAPIKeysMu.RLock()
+	store := moldAPICredentialsStore
+	moldAPIKeysMu.RUnlock()
+	if store == nil {
+		return nil
+	}
+	_, configured, err := store.LoadMoldDBPassword(context.Background())
+	if err != nil || configured {
+		return err
+	}
+	dbCfg := GetMoldDBConfig()
+	password, err := readSecretFile(dbCfg.PasswordFile, "mold.db.passwordFile")
+	if err != nil {
+		return err
+	}
+	return store.SaveMoldDBPassword(context.Background(), password)
+}
+
+// ReadMoldDBPassword uses the encrypted SQLite value first and keeps the old
+// password file as a bootstrap/fallback for deployments without the local DB.
+func ReadMoldDBPassword() (string, error) {
+	moldAPIKeysMu.RLock()
+	store := moldAPICredentialsStore
+	moldAPIKeysMu.RUnlock()
+	if store != nil {
+		password, configured, err := store.LoadMoldDBPassword(context.Background())
+		if err != nil {
+			return "", err
+		}
+		if configured {
+			return password, nil
+		}
+	}
+	dbCfg := GetMoldDBConfig()
+	return readSecretFile(dbCfg.PasswordFile, "mold.db.passwordFile")
+}
+
+func writeMoldAPIKeys(apiKeyPath, secretKeyPath, apiKey, secretKey string) error {
+	apiKey = strings.TrimSpace(apiKey)
+	secretKey = strings.TrimSpace(secretKey)
+	if apiKeyPath == "" || secretKeyPath == "" {
+		return fmt.Errorf("Mold API credential file path is empty")
+	}
+	if apiKeyPath == secretKeyPath {
+		return fmt.Errorf("Mold API credential file paths must be different")
+	}
+	if apiKey == "" || secretKey == "" {
+		return fmt.Errorf("Mold API credentials must not be empty")
+	}
+
+	apiTemp, err := stageSecretFile(apiKeyPath, apiKey)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(apiTemp)
+	secretTemp, err := stageSecretFile(secretKeyPath, secretKey)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(secretTemp)
+
+	moldAPIKeysMu.Lock()
+	defer moldAPIKeysMu.Unlock()
+	if err := os.Rename(apiTemp, apiKeyPath); err != nil {
+		return fmt.Errorf("failed to replace Mold API key: %w", err)
+	}
+	if err := os.Rename(secretTemp, secretKeyPath); err != nil {
+		return fmt.Errorf("failed to replace Mold secret key: %w", err)
+	}
+	return nil
+}
+
+func stageSecretFile(path, value string) (string, error) {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", fmt.Errorf("failed to prepare secret directory: %w", err)
+	}
+	file, err := os.CreateTemp(dir, "."+filepath.Base(path)+"-*")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temporary secret file: %w", err)
+	}
+	tempPath := file.Name()
+	remove := true
+	defer func() {
+		_ = file.Close()
+		if remove {
+			_ = os.Remove(tempPath)
+		}
+	}()
+	if err := file.Chmod(0600); err != nil {
+		return "", fmt.Errorf("failed to protect temporary secret file: %w", err)
+	}
+	if _, err := file.WriteString(value + "\n"); err != nil {
+		return "", fmt.Errorf("failed to write temporary secret file: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		return "", fmt.Errorf("failed to sync temporary secret file: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return "", fmt.Errorf("failed to close temporary secret file: %w", err)
+	}
+	remove = false
+	return tempPath, nil
 }
 
 func GetMoldDBConfig() MoldDBConfig {
@@ -101,7 +268,7 @@ func GetMoldDBConfig() MoldDBConfig {
 
 func OpenMoldDB() (*sql.DB, error) {
 	dbCfg := GetMoldDBConfig()
-	password, err := readSecretFile(dbCfg.PasswordFile, "mold.db.passwordFile")
+	password, err := ReadMoldDBPassword()
 	if err != nil {
 		return nil, err
 	}

@@ -213,6 +213,7 @@ func init() {
 	cfg.SetDefault("custom.database.driver", "")
 	cfg.SetDefault("custom.database.path", "/usr/share/ablestack/ablestack-netdive/netdive.db")
 	cfg.SetDefault("custom.database.journalMode", "WAL")
+	cfg.SetDefault("custom.database.credentialKeyFile", "/usr/share/ablestack/ablestack-netdive/secrets/netdive-credential-key")
 	cfg.SetDefault("custom.database.busyTimeout", 5000)
 	cfg.SetDefault("custom.database.eventHistoryRetentionDays", 30)
 

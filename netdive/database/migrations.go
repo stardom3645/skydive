@@ -112,6 +112,14 @@ func init() {
 		`CREATE INDEX ix_event_resource_id ON event_history(resource_id, occurred_at)`,
 		`CREATE INDEX ix_event_type ON event_history(event_type, occurred_at)`,
 	}})
+	migrations = append(migrations, migration{version: 5, name: "create encrypted Mold API credentials", statements: []string{
+		`CREATE TABLE mold_api_credentials (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			nonce BLOB NOT NULL,
+			ciphertext BLOB NOT NULL,
+			updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+		)`,
+	}})
 }
 
 func (d *Database) migrate(ctx context.Context) error {

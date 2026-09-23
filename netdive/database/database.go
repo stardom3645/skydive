@@ -35,16 +35,19 @@ type Config struct {
 	JournalMode               string
 	BusyTimeout               int
 	EventHistoryRetentionDays int
+	CredentialKeyFile         string
 }
 
 // Database is the common access point for Netdive's local persistent data.
 // Later manual-mapping repositories should share this handle rather than open
 // feature-specific connections.
 type Database struct {
-	db       *sql.DB
-	path     string
-	events   *eventWriter
-	manualMu sync.Mutex
+	db                *sql.DB
+	path              string
+	events            *eventWriter
+	manualMu          sync.Mutex
+	credentialMu      sync.Mutex
+	credentialKeyFile string
 }
 
 // ConfigFromGlobal reads the ABLESTACK-specific custom.database section.
@@ -55,6 +58,7 @@ func ConfigFromGlobal() Config {
 		JournalMode:               config.GetString("custom.database.journalMode"),
 		BusyTimeout:               config.GetInt("custom.database.busyTimeout"),
 		EventHistoryRetentionDays: config.GetInt("custom.database.eventHistoryRetentionDays"),
+		CredentialKeyFile:         config.GetString("custom.database.credentialKeyFile"),
 	}
 }
 
@@ -107,7 +111,7 @@ func Open(ctx context.Context, cfg Config) (*Database, error) {
 	sqlDB.SetMaxOpenConns(1)
 	sqlDB.SetMaxIdleConns(1)
 
-	db := &Database{db: sqlDB, path: cfg.Path}
+	db := &Database{db: sqlDB, path: cfg.Path, credentialKeyFile: cfg.CredentialKeyFile}
 	if err := sqlDB.PingContext(ctx); err != nil {
 		sqlDB.Close()
 		return nil, fmt.Errorf("cannot open Netdive database %q: %w", cfg.Path, err)
