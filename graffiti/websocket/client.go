@@ -18,7 +18,6 @@
 package websocket
 
 import (
-	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -32,7 +31,6 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/safchain/insanelock"
-	"google.golang.org/appengine/log"
 
 	shttp "github.com/skydive-project/skydive/graffiti/http"
 	"github.com/skydive-project/skydive/graffiti/logging"
@@ -548,7 +546,7 @@ func (c *Client) Connect() error {
 		c.conn, resp, err = d.Dial(endpoint, headers)
 		if err != nil {
 			if time.Since(lastLogTime) > 30*time.Minute {
-				log.Errorf(context.Background(), "WebSocket 연결 실패 (%s): %v", endpoint, err)
+				c.Opts.Logger.Errorf("WebSocket 연결 실패 (%s): %v", endpoint, err)
 				lastLogTime = time.Now()
 			}
 			time.Sleep(10 * time.Second)
