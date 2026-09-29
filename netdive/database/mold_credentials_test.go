@@ -90,3 +90,30 @@ func TestMoldAPICredentialsMissingAndTampered(t *testing.T) {
 		t.Fatal("expected tampered ciphertext to be rejected")
 	}
 }
+
+func TestDeleteMoldCredentialsRemovesOnlyCredentialRow(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(context.Background(), testConfig(filepath.Join(dir, "netdive.db")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if err := db.SaveMoldCredentials(ctx, "api", "secret", "db-password"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteMoldCredentials(ctx); err != nil {
+		t.Fatal(err)
+	}
+	_, _, apiConfigured, err := db.LoadMoldAPICredentials(ctx)
+	if err != nil || apiConfigured {
+		t.Fatalf("API configured after delete = %v, err=%v", apiConfigured, err)
+	}
+	_, dbConfigured, err := db.LoadMoldDBPassword(ctx)
+	if err != nil || dbConfigured {
+		t.Fatalf("DB configured after delete = %v, err=%v", dbConfigured, err)
+	}
+	if _, err := os.Stat(db.credentialKeyFile); err != nil {
+		t.Fatalf("credential key should be retained: %v", err)
+	}
+}

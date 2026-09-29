@@ -143,30 +143,7 @@ func requestMoldConsoleURL(vmID, mock string) (string, error) {
 
 	apiKey, secretKey, err := common.ReadMoldAPIKeys()
 	if err != nil {
-		secretErr := &common.SecretFileError{}
-		if errors.As(err, &secretErr) {
-			switch secretErr.KeyName {
-			case "mold.api.apiKeyFile":
-				switch secretErr.Reason {
-				case common.SecretFileMissing:
-					return "", newVMConsoleAPIError(http.StatusServiceUnavailable, "API Key 파일이 없습니다.", err)
-				case common.SecretFileEmpty:
-					return "", newVMConsoleAPIError(http.StatusServiceUnavailable, "API Key 파일이 비어 있습니다.", err)
-				default:
-					return "", newVMConsoleAPIError(http.StatusServiceUnavailable, "API Key 파일 읽기 실패", err)
-				}
-			case "mold.api.secretKeyFile":
-				switch secretErr.Reason {
-				case common.SecretFileMissing:
-					return "", newVMConsoleAPIError(http.StatusServiceUnavailable, "Secret Key 파일이 없습니다.", err)
-				case common.SecretFileEmpty:
-					return "", newVMConsoleAPIError(http.StatusServiceUnavailable, "Secret Key 파일이 비어 있습니다.", err)
-				default:
-					return "", newVMConsoleAPIError(http.StatusServiceUnavailable, "Secret Key 파일 읽기 실패", err)
-				}
-			}
-		}
-		return "", newVMConsoleAPIError(http.StatusServiceUnavailable, "Mold API Key/Secret 로드 실패", err)
+		return "", newVMConsoleAPIError(http.StatusServiceUnavailable, "Mold 연동 정보가 설정되지 않았습니다.", err)
 	}
 
 	baseURL, err := url.Parse(apiCfg.Endpoint)

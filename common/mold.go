@@ -5,12 +5,13 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+	"net"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
-	_ "github.com/go-sql-driver/mysql"
+	mysql "github.com/go-sql-driver/mysql"
 
 	"github.com/skydive-project/skydive/config"
 )
@@ -26,13 +27,14 @@ var (
 )
 
 // MoldCredentialsStore is implemented by Netdive's encrypted local SQLite
-// credential repository. A nil store preserves the legacy secret-file mode.
+// credential repository. Credentials are never read from plaintext files.
 type MoldCredentialsStore interface {
 	LoadMoldAPICredentials(context.Context) (string, string, bool, error)
 	SaveMoldAPICredentials(context.Context, string, string) error
 	LoadMoldDBPassword(context.Context) (string, bool, error)
 	SaveMoldDBPassword(context.Context, string) error
 	SaveMoldCredentials(context.Context, string, string, string) error
+	DeleteMoldCredentials(context.Context) error
 }
 
 // SetMoldAPICredentialsStore selects encrypted SQLite storage for Mold API
@@ -51,39 +53,7 @@ type MoldDBConfig struct {
 }
 
 type MoldAPIConfig struct {
-	Endpoint      string
-	APIKeyFile    string
-	SecretKeyFile string
-}
-
-type SecretFileErrorReason string
-
-const (
-	SecretFileMissing SecretFileErrorReason = "missing"
-	SecretFileRead    SecretFileErrorReason = "read"
-	SecretFileEmpty   SecretFileErrorReason = "empty"
-)
-
-type SecretFileError struct {
-	KeyName string
-	Path    string
-	Reason  SecretFileErrorReason
-	Err     error
-}
-
-func (e *SecretFileError) Error() string {
-	switch e.Reason {
-	case SecretFileMissing:
-		return fmt.Sprintf("%s is empty", e.KeyName)
-	case SecretFileEmpty:
-		return fmt.Sprintf("secret file %s is empty", e.KeyName)
-	default:
-		return fmt.Sprintf("failed to read secret file %s", e.KeyName)
-	}
-}
-
-func (e *SecretFileError) Unwrap() error {
-	return e.Err
+	Endpoint string
 }
 
 func IsMoldConsoleEnabled() bool {
@@ -100,9 +70,7 @@ func GetMoldConsoleAPIEndpoint() string {
 
 func GetMoldAPIConfig() MoldAPIConfig {
 	return MoldAPIConfig{
-		Endpoint:      config.GetString("mold.api.endpoint"),
-		APIKeyFile:    config.GetString("mold.api.apiKeyFile"),
-		SecretKeyFile: config.GetString("mold.api.secretKeyFile"),
+		Endpoint: config.GetString("mold.api.endpoint"),
 	}
 }
 
@@ -111,47 +79,17 @@ func ReadMoldAPIKeys() (string, string, error) {
 	store := moldAPICredentialsStore
 	moldAPIKeysMu.RUnlock()
 
-	if store != nil {
-		apiKey, secretKey, configured, err := store.LoadMoldAPICredentials(context.Background())
-		if err != nil {
-			return "", "", err
-		}
-		if configured {
-			return apiKey, secretKey, nil
-		}
-		return "", "", ErrMoldAPICredentialsNotConfigured
+	if store == nil {
+		return "", "", fmt.Errorf("encrypted Netdive credential store is not available")
 	}
-
-	apiCfg := GetMoldAPIConfig()
-	apiKey, err := readSecretFile(apiCfg.APIKeyFile, "mold.api.apiKeyFile")
+	apiKey, secretKey, configured, err := store.LoadMoldAPICredentials(context.Background())
 	if err != nil {
 		return "", "", err
 	}
-	secretKey, err := readSecretFile(apiCfg.SecretKeyFile, "mold.api.secretKeyFile")
-	if err != nil {
-		return "", "", err
+	if configured {
+		return apiKey, secretKey, nil
 	}
-	return apiKey, secretKey, nil
-}
-
-// WriteMoldAPIKeys replaces the configured Mold credentials without exposing
-// them through the application configuration or requiring an analyzer restart.
-func WriteMoldAPIKeys(apiKey, secretKey string) error {
-	apiKey = strings.TrimSpace(apiKey)
-	secretKey = strings.TrimSpace(secretKey)
-	if apiKey == "" || secretKey == "" {
-		return fmt.Errorf("Mold API credentials must not be empty")
-	}
-
-	moldAPIKeysMu.RLock()
-	store := moldAPICredentialsStore
-	moldAPIKeysMu.RUnlock()
-	if store != nil {
-		return store.SaveMoldAPICredentials(context.Background(), apiKey, secretKey)
-	}
-
-	apiCfg := GetMoldAPIConfig()
-	return writeMoldAPIKeys(apiCfg.APIKeyFile, apiCfg.SecretKeyFile, apiKey, secretKey)
+	return "", "", ErrMoldAPICredentialsNotConfigured
 }
 
 // MoldCredentialsConfigured reports which encrypted values exist without
@@ -161,9 +99,7 @@ func MoldCredentialsConfigured() (bool, bool, error) {
 	store := moldAPICredentialsStore
 	moldAPIKeysMu.RUnlock()
 	if store == nil {
-		_, _, apiErr := ReadMoldAPIKeys()
-		_, dbErr := ReadMoldDBPassword()
-		return apiErr == nil, dbErr == nil, nil
+		return false, false, fmt.Errorf("encrypted Netdive credential store is not available")
 	}
 	_, _, apiConfigured, err := store.LoadMoldAPICredentials(context.Background())
 	if err != nil {
@@ -188,6 +124,18 @@ func WriteMoldCredentials(apiKey, secretKey, dbPassword string) error {
 	return store.SaveMoldCredentials(context.Background(), apiKey, secretKey, dbPassword)
 }
 
+// DeleteMoldCredentials removes only the encrypted Mold credential payload.
+// Netdive's database, encryption key, event history, and manual mappings stay intact.
+func DeleteMoldCredentials() error {
+	moldAPIKeysMu.RLock()
+	store := moldAPICredentialsStore
+	moldAPIKeysMu.RUnlock()
+	if store == nil {
+		return fmt.Errorf("encrypted Netdive credential store is not available")
+	}
+	return store.DeleteMoldCredentials(context.Background())
+}
+
 // ReadMoldDBPassword reads only from Netdive's encrypted SQLite store.
 func ReadMoldDBPassword() (string, error) {
 	moldAPIKeysMu.RLock()
@@ -206,74 +154,6 @@ func ReadMoldDBPassword() (string, error) {
 	return "", fmt.Errorf("encrypted Netdive credential store is not available")
 }
 
-func writeMoldAPIKeys(apiKeyPath, secretKeyPath, apiKey, secretKey string) error {
-	apiKey = strings.TrimSpace(apiKey)
-	secretKey = strings.TrimSpace(secretKey)
-	if apiKeyPath == "" || secretKeyPath == "" {
-		return fmt.Errorf("Mold API credential file path is empty")
-	}
-	if apiKeyPath == secretKeyPath {
-		return fmt.Errorf("Mold API credential file paths must be different")
-	}
-	if apiKey == "" || secretKey == "" {
-		return fmt.Errorf("Mold API credentials must not be empty")
-	}
-
-	apiTemp, err := stageSecretFile(apiKeyPath, apiKey)
-	if err != nil {
-		return err
-	}
-	defer os.Remove(apiTemp)
-	secretTemp, err := stageSecretFile(secretKeyPath, secretKey)
-	if err != nil {
-		return err
-	}
-	defer os.Remove(secretTemp)
-
-	moldAPIKeysMu.Lock()
-	defer moldAPIKeysMu.Unlock()
-	if err := os.Rename(apiTemp, apiKeyPath); err != nil {
-		return fmt.Errorf("failed to replace Mold API key: %w", err)
-	}
-	if err := os.Rename(secretTemp, secretKeyPath); err != nil {
-		return fmt.Errorf("failed to replace Mold secret key: %w", err)
-	}
-	return nil
-}
-
-func stageSecretFile(path, value string) (string, error) {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return "", fmt.Errorf("failed to prepare secret directory: %w", err)
-	}
-	file, err := os.CreateTemp(dir, "."+filepath.Base(path)+"-*")
-	if err != nil {
-		return "", fmt.Errorf("failed to create temporary secret file: %w", err)
-	}
-	tempPath := file.Name()
-	remove := true
-	defer func() {
-		_ = file.Close()
-		if remove {
-			_ = os.Remove(tempPath)
-		}
-	}()
-	if err := file.Chmod(0600); err != nil {
-		return "", fmt.Errorf("failed to protect temporary secret file: %w", err)
-	}
-	if _, err := file.WriteString(value + "\n"); err != nil {
-		return "", fmt.Errorf("failed to write temporary secret file: %w", err)
-	}
-	if err := file.Sync(); err != nil {
-		return "", fmt.Errorf("failed to sync temporary secret file: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		return "", fmt.Errorf("failed to close temporary secret file: %w", err)
-	}
-	remove = false
-	return tempPath, nil
-}
-
 func GetMoldDBConfig() MoldDBConfig {
 	return MoldDBConfig{
 		Host: config.GetString("mold.db.host"),
@@ -284,24 +164,45 @@ func GetMoldDBConfig() MoldDBConfig {
 }
 
 func OpenMoldDB() (*sql.DB, error) {
-	dbCfg := GetMoldDBConfig()
 	password, err := ReadMoldDBPassword()
 	if err != nil {
 		return nil, err
 	}
+	return openMoldDBWithPassword(password)
+}
 
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", dbCfg.User, password, dbCfg.Host, dbCfg.Port, dbCfg.Name)
+func openMoldDBWithPassword(password string) (*sql.DB, error) {
+	dbCfg := GetMoldDBConfig()
+	dsn := (&mysql.Config{
+		User: dbCfg.User, Passwd: password, Net: "tcp",
+		Addr: net.JoinHostPort(dbCfg.Host, strconv.Itoa(dbCfg.Port)), DBName: dbCfg.Name,
+	}).FormatDSN()
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return nil, err
 	}
-
-	if err := db.Ping(); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
 		db.Close()
 		return nil, err
 	}
-
 	return db, nil
+}
+
+// TestMoldDBPassword verifies the configured Mold database endpoint without
+// persisting the supplied plaintext password.
+func TestMoldDBPassword(password string) error {
+	if strings.TrimSpace(password) == "" {
+		return ErrMoldDBPasswordNotConfigured
+	}
+	db, err := openMoldDBWithPassword(password)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	var one int
+	return db.QueryRow("SELECT 1").Scan(&one)
 }
 
 func ResolveVMIDFromNodeID(nodeID string) (string, error) {
@@ -348,43 +249,4 @@ func ResolveVMIDFromInstanceName(instanceName string) (string, error) {
 	}
 
 	return vmID, nil
-}
-
-func readSecretFile(path, keyName string) (string, error) {
-	if path == "" {
-		return "", &SecretFileError{
-			KeyName: keyName,
-			Path:    path,
-			Reason:  SecretFileMissing,
-		}
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return "", &SecretFileError{
-				KeyName: keyName,
-				Path:    path,
-				Reason:  SecretFileMissing,
-				Err:     err,
-			}
-		}
-		return "", &SecretFileError{
-			KeyName: keyName,
-			Path:    path,
-			Reason:  SecretFileRead,
-			Err:     err,
-		}
-	}
-
-	password := strings.TrimSpace(string(data))
-	if password == "" {
-		return "", &SecretFileError{
-			KeyName: keyName,
-			Path:    path,
-			Reason:  SecretFileEmpty,
-		}
-	}
-
-	return password, nil
 }

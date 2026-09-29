@@ -105,7 +105,6 @@ func (d *Database) SaveMoldCredentials(ctx context.Context, apiKey, secretKey, d
 	}
 	apiKey = strings.TrimSpace(apiKey)
 	secretKey = strings.TrimSpace(secretKey)
-	dbPassword = strings.TrimSpace(dbPassword)
 	if apiKey == "" || secretKey == "" {
 		return fmt.Errorf("Mold API credentials must not be empty")
 	}
@@ -122,6 +121,9 @@ func (d *Database) SaveMoldCredentials(ctx context.Context, apiKey, secretKey, d
 	payload.APIKey = apiKey
 	payload.SecretKey = secretKey
 	if dbPassword != "" {
+		if strings.TrimSpace(dbPassword) == "" {
+			return fmt.Errorf("Mold database password must not be empty")
+		}
 		payload.DBPassword = dbPassword
 	}
 	if strings.TrimSpace(payload.DBPassword) == "" {
@@ -136,8 +138,7 @@ func (d *Database) SaveMoldDBPassword(ctx context.Context, password string) erro
 	if d == nil || d.db == nil {
 		return fmt.Errorf("Netdive database is not available")
 	}
-	password = strings.TrimSpace(password)
-	if password == "" {
+	if strings.TrimSpace(password) == "" {
 		return fmt.Errorf("Mold database password must not be empty")
 	}
 	d.credentialMu.Lock()
@@ -151,6 +152,21 @@ func (d *Database) SaveMoldDBPassword(ctx context.Context, password string) erro
 	}
 	payload.DBPassword = password
 	return d.saveMoldCredentialsPayload(ctx, payload)
+}
+
+// DeleteMoldCredentials removes the singleton encrypted credential payload.
+// The separate encryption key is retained for the next setup.
+func (d *Database) DeleteMoldCredentials(ctx context.Context) error {
+	if d == nil || d.db == nil {
+		return fmt.Errorf("Netdive database is not available")
+	}
+	d.credentialMu.Lock()
+	defer d.credentialMu.Unlock()
+	_, err := d.db.ExecContext(ctx, "DELETE FROM mold_api_credentials WHERE id = ?", credentialID)
+	if err != nil {
+		return fmt.Errorf("delete encrypted Mold credentials: %w", err)
+	}
+	return nil
 }
 
 func (d *Database) saveMoldCredentialsPayload(ctx context.Context, credentials moldCredentialsPayload) error {
