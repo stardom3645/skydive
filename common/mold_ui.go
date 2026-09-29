@@ -68,11 +68,43 @@ func moldUIURLFromAPIEndpoint(apiEndpoint string) (string, error) {
 	return fmt.Sprintf("%s://%s/client/#/accountuser?username=admin", endpoint.Scheme, endpoint.Host), nil
 }
 
+func moldAPIEndpointWithHost(apiEndpoint, host string) string {
+	endpoint, err := url.Parse(strings.TrimSpace(apiEndpoint))
+	if err != nil || endpoint.Hostname() == "" || host == "" {
+		return apiEndpoint
+	}
+	if port := endpoint.Port(); port != "" {
+		endpoint.Host = net.JoinHostPort(host, port)
+	} else {
+		endpoint.Host = host
+	}
+	return endpoint.String()
+}
+
+func resolveMoldBrowserHost(host string) string {
+	if ip := net.ParseIP(host); ip != nil {
+		return host
+	}
+	addresses, err := net.LookupIP(host)
+	if err != nil {
+		return host
+	}
+	for _, address := range addresses {
+		if ipv4 := address.To4(); ipv4 != nil && !ipv4.IsLoopback() {
+			return ipv4.String()
+		}
+	}
+	return host
+}
+
 // GetMoldAccountUserURL returns a non-secret browser URL for the Mold admin
 // account-user screen. The management server's listener configuration is the
 // source of truth; the configured API endpoint is only a safe fallback.
 func GetMoldAccountUserURL() string {
 	apiEndpoint := GetMoldAPIConfig().Endpoint
+	if endpoint, err := url.Parse(strings.TrimSpace(apiEndpoint)); err == nil {
+		apiEndpoint = moldAPIEndpointWithHost(apiEndpoint, resolveMoldBrowserHost(endpoint.Hostname()))
+	}
 	if content, err := os.ReadFile(moldServerPropertiesPath); err == nil {
 		if uiURL, err := moldUIURLFromProperties(string(content), apiEndpoint); err == nil {
 			return uiURL

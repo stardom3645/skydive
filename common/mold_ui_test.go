@@ -54,3 +54,11 @@ func TestMoldUIURLFallsBackToAPIEndpoint(t *testing.T) {
 		t.Fatalf("moldUIURLFromAPIEndpoint() = %q, want %q", got, want)
 	}
 }
+
+func TestMoldAPIEndpointUsesBrowserReachableIP(t *testing.T) {
+	got := moldAPIEndpointWithHost("http://ccvm:8080/client/api", "10.10.0.10")
+	want := "http://10.10.0.10:8080/client/api"
+	if got != want {
+		t.Fatalf("moldAPIEndpointWithHost() = %q, want %q", got, want)
+	}
+}

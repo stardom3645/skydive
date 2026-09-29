@@ -2,6 +2,7 @@ package common
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -31,7 +32,9 @@ var (
 func LoadVMNetworkMapFromCloudstack() {
 	db, err := OpenMoldDB()
 	if err != nil {
-		log.Printf("DB connection failed for vm network map: %v", err)
+		if !errors.Is(err, ErrMoldDBPasswordNotConfigured) {
+			log.Printf("DB connection failed for vm network map: %v", err)
+		}
 		return
 	}
 	defer db.Close()

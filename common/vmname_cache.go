@@ -1,6 +1,7 @@
 package common
 
 import (
+	"errors"
 	"log"
 	"sync"
 	"time"
@@ -14,7 +15,9 @@ var (
 func LoadVmNameMapFromCloudstack() {
 	db, err := OpenMoldDB()
 	if err != nil {
-		log.Printf("DB 연결 실패: %v", err)
+		if !errors.Is(err, ErrMoldDBPasswordNotConfigured) {
+			log.Printf("DB 연결 실패: %v", err)
+		}
 		return
 	}
 	defer db.Close()

@@ -1,7 +1,9 @@
 package common
 
 import (
+	"bytes"
 	"context"
+	"log"
 	"testing"
 )
 
@@ -90,5 +92,24 @@ func TestDeleteMoldCredentialsClearsConfiguredStatus(t *testing.T) {
 	apiConfigured, dbConfigured, err := MoldCredentialsConfigured()
 	if err != nil || apiConfigured || dbConfigured {
 		t.Fatalf("configured status after delete = api:%v db:%v err:%v", apiConfigured, dbConfigured, err)
+	}
+}
+
+func TestUnconfiguredMoldDBCacheRefreshesStayQuiet(t *testing.T) {
+	store := &testMoldCredentialsStore{}
+	SetMoldAPICredentialsStore(store)
+	t.Cleanup(func() { SetMoldAPICredentialsStore(nil) })
+
+	var output bytes.Buffer
+	previousWriter := log.Writer()
+	log.SetOutput(&output)
+	t.Cleanup(func() { log.SetOutput(previousWriter) })
+
+	LoadVmNameMapFromCloudstack()
+	LoadVMNetworkMapFromCloudstack()
+	LoadVMDetailMapFromCloudstack()
+
+	if output.Len() != 0 {
+		t.Fatalf("unconfigured Mold DB produced repeated cache logs: %s", output.String())
 	}
 }
