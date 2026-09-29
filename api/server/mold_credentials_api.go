@@ -52,13 +52,17 @@ func decodeMoldCredentialsRequest(w http.ResponseWriter, r *auth.AuthenticatedRe
 	}
 	request.APIKey = strings.TrimSpace(request.APIKey)
 	request.SecretKey = strings.TrimSpace(request.SecretKey)
-	if request.APIKey == "" || request.SecretKey == "" {
-		return request, errors.New("API Key와 Secret Key를 모두 입력해 주세요.")
-	}
 	if len(request.APIKey) > maxCredentialLength || len(request.SecretKey) > maxCredentialLength || len(request.DBPassword) > maxCredentialLength {
 		return request, errors.New("입력한 키가 허용된 길이를 초과했습니다.")
 	}
 	return request, nil
+}
+
+func validateMoldAPIInput(request moldCredentialsRequest) error {
+	if request.APIKey == "" || request.SecretKey == "" {
+		return errors.New("API Key와 Secret Key를 모두 입력해 주세요.")
+	}
+	return nil
 }
 
 func testMoldAPI(apiKey, secretKey string) error {
@@ -130,11 +134,53 @@ func handleMoldCredentialsTest(w http.ResponseWriter, r *auth.AuthenticatedReque
 		writeMoldCredentialsJSON(w, http.StatusBadRequest, moldCredentialsStatus{Message: err.Error()})
 		return
 	}
+	if err := validateMoldAPIInput(request); err != nil {
+		writeMoldCredentialsJSON(w, http.StatusBadRequest, moldCredentialsStatus{Message: err.Error()})
+		return
+	}
 	if err := testMoldCredentials(request.APIKey, request.SecretKey, request.DBPassword); err != nil {
 		writeMoldCredentialsJSON(w, moldCredentialsErrorStatus(err), moldCredentialsStatus{Message: err.Error()})
 		return
 	}
 	writeMoldCredentialsJSON(w, http.StatusOK, moldCredentialsStatus{Message: "Mold API와 DB 연결에 성공했습니다."})
+}
+
+func handleMoldAPICredentialsTest(w http.ResponseWriter, r *auth.AuthenticatedRequest) {
+	if !rbac.Enforce(r.Username, moldCredentialsObject, "write") {
+		writeMoldCredentialsJSON(w, http.StatusForbidden, moldCredentialsStatus{Message: "관리 권한이 필요합니다."})
+		return
+	}
+	request, err := decodeMoldCredentialsRequest(w, r)
+	if err != nil {
+		writeMoldCredentialsJSON(w, http.StatusBadRequest, moldCredentialsStatus{Message: err.Error()})
+		return
+	}
+	if err := validateMoldAPIInput(request); err != nil {
+		writeMoldCredentialsJSON(w, http.StatusBadRequest, moldCredentialsStatus{Message: err.Error()})
+		return
+	}
+	if err := testMoldAPI(request.APIKey, request.SecretKey); err != nil {
+		writeMoldCredentialsJSON(w, moldCredentialsErrorStatus(err), moldCredentialsStatus{Message: err.Error()})
+		return
+	}
+	writeMoldCredentialsJSON(w, http.StatusOK, moldCredentialsStatus{Message: "Mold API 연결에 성공했습니다."})
+}
+
+func handleMoldDBCredentialsTest(w http.ResponseWriter, r *auth.AuthenticatedRequest) {
+	if !rbac.Enforce(r.Username, moldCredentialsObject, "write") {
+		writeMoldCredentialsJSON(w, http.StatusForbidden, moldCredentialsStatus{Message: "관리 권한이 필요합니다."})
+		return
+	}
+	request, err := decodeMoldCredentialsRequest(w, r)
+	if err != nil {
+		writeMoldCredentialsJSON(w, http.StatusBadRequest, moldCredentialsStatus{Message: err.Error()})
+		return
+	}
+	if err := testMoldDB(request.DBPassword); err != nil {
+		writeMoldCredentialsJSON(w, moldCredentialsErrorStatus(err), moldCredentialsStatus{Message: err.Error()})
+		return
+	}
+	writeMoldCredentialsJSON(w, http.StatusOK, moldCredentialsStatus{Message: "Mold DB 연결에 성공했습니다."})
 }
 
 func handleMoldCredentialsPut(w http.ResponseWriter, r *auth.AuthenticatedRequest) {
@@ -144,6 +190,10 @@ func handleMoldCredentialsPut(w http.ResponseWriter, r *auth.AuthenticatedReques
 	}
 	request, err := decodeMoldCredentialsRequest(w, r)
 	if err != nil {
+		writeMoldCredentialsJSON(w, http.StatusBadRequest, moldCredentialsStatus{Message: err.Error()})
+		return
+	}
+	if err := validateMoldAPIInput(request); err != nil {
 		writeMoldCredentialsJSON(w, http.StatusBadRequest, moldCredentialsStatus{Message: err.Error()})
 		return
 	}
@@ -191,6 +241,8 @@ func RegisterMoldCredentialsAPI(httpServer *shttp.Server, authBackend shttp.Auth
 	httpServer.RegisterRoutes([]shttp.Route{
 		{Name: "MoldCredentialsStatus", Method: "GET", Path: "/api/mold/credentials", HandlerFunc: handleMoldCredentialsGet},
 		{Name: "MoldCredentialsTest", Method: "POST", Path: "/api/mold/credentials/test", HandlerFunc: handleMoldCredentialsTest},
+		{Name: "MoldAPICredentialsTest", Method: "POST", Path: "/api/mold/credentials/test/api", HandlerFunc: handleMoldAPICredentialsTest},
+		{Name: "MoldDBCredentialsTest", Method: "POST", Path: "/api/mold/credentials/test/db", HandlerFunc: handleMoldDBCredentialsTest},
 		{Name: "MoldCredentialsUpdate", Method: "PUT", Path: "/api/mold/credentials", HandlerFunc: handleMoldCredentialsPut},
 		{Name: "MoldCredentialsDelete", Method: "DELETE", Path: "/api/mold/credentials", HandlerFunc: handleMoldCredentialsDelete},
 	}, authBackend)
