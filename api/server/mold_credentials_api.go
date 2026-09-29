@@ -32,6 +32,7 @@ type moldCredentialsStatus struct {
 	Configured           bool   `json:"configured"`
 	APIConfigured        bool   `json:"apiConfigured"`
 	DBPasswordConfigured bool   `json:"dbPasswordConfigured"`
+	UIURL                string `json:"uiURL,omitempty"`
 	Message              string `json:"message,omitempty"`
 }
 
@@ -121,6 +122,7 @@ func handleMoldCredentialsGet(w http.ResponseWriter, r *auth.AuthenticatedReques
 	}
 	writeMoldCredentialsJSON(w, http.StatusOK, moldCredentialsStatus{
 		Configured: apiConfigured && dbConfigured, APIConfigured: apiConfigured, DBPasswordConfigured: dbConfigured,
+		UIURL: common.GetMoldAccountUserURL(),
 	})
 }
 
