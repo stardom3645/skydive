@@ -196,6 +196,8 @@ func init() {
 	cfg.SetDefault("mold.db.port", 3306)
 	cfg.SetDefault("mold.db.name", "cloud")
 	cfg.SetDefault("mold.db.user", "cloud")
+	cfg.SetDefault("mold.db.propertiesFile", "/etc/cloudstack/management/db.properties")
+	cfg.SetDefault("mold.db.managementKeyFile", "/etc/cloudstack/management/key")
 	cfg.SetDefault("mold.vmNameMap.refreshInterval", 10)
 	cfg.SetDefault("mold.vmNetworkMap.refreshInterval", 10)
 	cfg.SetDefault("mold.kubernetes.kubeconfigPath", "/usr/share/ablestack/ablestack-netdive/kubeconfigs/selected.kubeconfig")
@@ -210,7 +212,6 @@ func init() {
 	cfg.SetDefault("custom.database.driver", "")
 	cfg.SetDefault("custom.database.path", "/usr/share/ablestack/ablestack-netdive/netdive.db")
 	cfg.SetDefault("custom.database.journalMode", "WAL")
-	cfg.SetDefault("custom.database.credentialKeyFile", "/usr/share/ablestack/ablestack-netdive/secrets/netdive-credential-key")
 	cfg.SetDefault("custom.database.busyTimeout", 5000)
 	cfg.SetDefault("custom.database.eventHistoryRetentionDays", 30)
 

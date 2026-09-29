@@ -81,25 +81,18 @@ func testMoldAPI(apiKey, secretKey string) error {
 	return verifyMoldAPIListCapabilities(client, baseURL, apiKey, secretKey)
 }
 
-func testMoldDB(dbPassword string) error {
-	if dbPassword == "" {
-		storedPassword, err := common.ReadMoldDBPassword()
-		if err != nil {
-			return newVMConsoleAPIError(http.StatusBadRequest, "Mold DB 비밀번호를 입력해 주세요.", err)
-		}
-		dbPassword = storedPassword
-	}
-	if err := common.TestMoldDBPassword(dbPassword); err != nil {
+func testMoldDB() error {
+	if err := common.TestMoldDBConnection(); err != nil {
 		return newVMConsoleAPIError(http.StatusBadGateway, "Mold DB 연결에 실패했습니다.", err)
 	}
 	return nil
 }
 
-func testMoldCredentials(apiKey, secretKey, dbPassword string) error {
+func testMoldCredentials(apiKey, secretKey string) error {
 	if err := testMoldAPI(apiKey, secretKey); err != nil {
 		return err
 	}
-	return testMoldDB(dbPassword)
+	return testMoldDB()
 }
 
 func moldCredentialsErrorStatus(err error) int {
@@ -140,7 +133,7 @@ func handleMoldCredentialsTest(w http.ResponseWriter, r *auth.AuthenticatedReque
 		writeMoldCredentialsJSON(w, http.StatusBadRequest, moldCredentialsStatus{Message: err.Error()})
 		return
 	}
-	if err := testMoldCredentials(request.APIKey, request.SecretKey, request.DBPassword); err != nil {
+	if err := testMoldCredentials(request.APIKey, request.SecretKey); err != nil {
 		writeMoldCredentialsJSON(w, moldCredentialsErrorStatus(err), moldCredentialsStatus{Message: err.Error()})
 		return
 	}
@@ -173,12 +166,12 @@ func handleMoldDBCredentialsTest(w http.ResponseWriter, r *auth.AuthenticatedReq
 		writeMoldCredentialsJSON(w, http.StatusForbidden, moldCredentialsStatus{Message: "관리 권한이 필요합니다."})
 		return
 	}
-	request, err := decodeMoldCredentialsRequest(w, r)
+	_, err := decodeMoldCredentialsRequest(w, r)
 	if err != nil {
 		writeMoldCredentialsJSON(w, http.StatusBadRequest, moldCredentialsStatus{Message: err.Error()})
 		return
 	}
-	if err := testMoldDB(request.DBPassword); err != nil {
+	if err := testMoldDB(); err != nil {
 		writeMoldCredentialsJSON(w, moldCredentialsErrorStatus(err), moldCredentialsStatus{Message: err.Error()})
 		return
 	}
@@ -199,26 +192,17 @@ func handleMoldCredentialsPut(w http.ResponseWriter, r *auth.AuthenticatedReques
 		writeMoldCredentialsJSON(w, http.StatusBadRequest, moldCredentialsStatus{Message: err.Error()})
 		return
 	}
-	_, dbConfigured, err := common.MoldCredentialsConfigured()
-	if err != nil {
-		writeMoldCredentialsJSON(w, http.StatusInternalServerError, moldCredentialsStatus{Message: "저장된 연동 정보를 확인할 수 없습니다."})
-		return
-	}
-	if request.DBPassword == "" && !dbConfigured {
-		writeMoldCredentialsJSON(w, http.StatusBadRequest, moldCredentialsStatus{Message: "Mold DB 비밀번호를 입력해 주세요."})
-		return
-	}
-	if err := testMoldCredentials(request.APIKey, request.SecretKey, request.DBPassword); err != nil {
+	if err := testMoldCredentials(request.APIKey, request.SecretKey); err != nil {
 		writeMoldCredentialsJSON(w, moldCredentialsErrorStatus(err), moldCredentialsStatus{Message: err.Error()})
 		return
 	}
-	if err := common.WriteMoldCredentials(request.APIKey, request.SecretKey, request.DBPassword); err != nil {
+	if err := common.WriteMoldCredentials(request.APIKey, request.SecretKey); err != nil {
 		writeMoldCredentialsJSON(w, http.StatusInternalServerError, moldCredentialsStatus{Message: "연동 정보를 저장하지 못했습니다."})
 		return
 	}
 	writeMoldCredentialsJSON(w, http.StatusOK, moldCredentialsStatus{
 		Configured: true, APIConfigured: true, DBPasswordConfigured: true,
-		Message: "Mold 연동 정보를 암호화하여 저장했습니다.",
+		Message: "Mold API 인증 정보를 암호화하여 저장했습니다.",
 	})
 }
 
@@ -227,13 +211,18 @@ func handleMoldCredentialsDelete(w http.ResponseWriter, r *auth.AuthenticatedReq
 		writeMoldCredentialsJSON(w, http.StatusForbidden, moldCredentialsStatus{Message: "연동 정보를 초기화할 권한이 없습니다."})
 		return
 	}
-	if err := common.DeleteMoldCredentials(); err != nil {
+	if err := common.DeleteMoldAPICredentials(); err != nil {
 		writeMoldCredentialsJSON(w, http.StatusInternalServerError, moldCredentialsStatus{Message: "Mold 연동 정보를 초기화하지 못했습니다."})
 		return
 	}
+	_, dbConfigured, err := common.MoldCredentialsConfigured()
+	if err != nil {
+		writeMoldCredentialsJSON(w, http.StatusInternalServerError, moldCredentialsStatus{Message: "저장된 연동 정보를 확인할 수 없습니다."})
+		return
+	}
 	writeMoldCredentialsJSON(w, http.StatusOK, moldCredentialsStatus{
-		Configured: false, APIConfigured: false, DBPasswordConfigured: false,
-		Message: "Mold 연동 정보를 초기화했습니다.",
+		Configured: false, APIConfigured: false, DBPasswordConfigured: dbConfigured,
+		Message: "Mold API 인증 정보를 초기화했습니다.",
 	})
 }
 

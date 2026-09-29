@@ -16,6 +16,7 @@ import (
 func TestMoldAPICredentialsEncryptedRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	cfg := testConfig(filepath.Join(dir, "netdive.db"))
+	writeTestManagementKey(t, cfg.ManagementKeyFile)
 	db, err := Open(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -24,8 +25,7 @@ func TestMoldAPICredentialsEncryptedRoundTrip(t *testing.T) {
 
 	apiKey := "api-key-must-not-appear-in-sqlite"
 	secretKey := "secret-key-must-not-appear-in-sqlite"
-	dbPassword := "db-password-must-not-appear-in-sqlite"
-	if err := db.SaveMoldCredentials(context.Background(), apiKey, secretKey, dbPassword); err != nil {
+	if err := db.SaveMoldAPICredentials(context.Background(), apiKey, secretKey); err != nil {
 		t.Fatal(err)
 	}
 	gotAPI, gotSecret, configured, err := db.LoadMoldAPICredentials(context.Background())
@@ -35,42 +35,35 @@ func TestMoldAPICredentialsEncryptedRoundTrip(t *testing.T) {
 	if !configured || gotAPI != apiKey || gotSecret != secretKey {
 		t.Fatalf("unexpected credential round trip: configured=%v api=%q secret=%q", configured, gotAPI, gotSecret)
 	}
-	gotPassword, passwordConfigured, err := db.LoadMoldDBPassword(context.Background())
-	if err != nil || !passwordConfigured || gotPassword != dbPassword {
-		t.Fatalf("unexpected DB password round trip: configured=%v password=%q err=%v", passwordConfigured, gotPassword, err)
-	}
-
 	var nonce, ciphertext []byte
 	if err := db.SQLDB().QueryRow("SELECT nonce, ciphertext FROM mold_api_credentials WHERE id = 1").Scan(&nonce, &ciphertext); err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(ciphertext, []byte(apiKey)) || bytes.Contains(ciphertext, []byte(secretKey)) || bytes.Contains(ciphertext, []byte(dbPassword)) {
+	if bytes.Contains(ciphertext, []byte(apiKey)) || bytes.Contains(ciphertext, []byte(secretKey)) {
 		t.Fatal("SQLite ciphertext contains a plaintext credential")
 	}
 	if len(nonce) != 12 {
 		t.Fatalf("nonce length = %d, want 12", len(nonce))
 	}
 
-	keyInfo, err := os.Stat(cfg.CredentialKeyFile)
+	keyInfo, err := os.Stat(cfg.ManagementKeyFile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if keyInfo.Mode().Perm() != 0600 {
-		t.Fatalf("credential key permissions = %o, want 600", keyInfo.Mode().Perm())
+	if keyInfo.Mode().Perm() != 0640 {
+		t.Fatalf("management key permissions = %o, want 640", keyInfo.Mode().Perm())
 	}
 
 	if err := db.SaveMoldAPICredentials(context.Background(), "new-api", "new-secret"); err != nil {
 		t.Fatal(err)
 	}
-	gotPassword, passwordConfigured, err = db.LoadMoldDBPassword(context.Background())
-	if err != nil || !passwordConfigured || gotPassword != dbPassword {
-		t.Fatalf("API-only update replaced DB password: configured=%v password=%q err=%v", passwordConfigured, gotPassword, err)
-	}
 }
 
 func TestMoldAPICredentialsMissingAndTampered(t *testing.T) {
 	dir := t.TempDir()
-	db, err := Open(context.Background(), testConfig(filepath.Join(dir, "netdive.db")))
+	cfg := testConfig(filepath.Join(dir, "netdive.db"))
+	writeTestManagementKey(t, cfg.ManagementKeyFile)
+	db, err := Open(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +73,7 @@ func TestMoldAPICredentialsMissingAndTampered(t *testing.T) {
 	if err != nil || configured {
 		t.Fatalf("empty credentials: configured=%v err=%v", configured, err)
 	}
-	if err := db.SaveMoldCredentials(context.Background(), "api", "secret", "db-password"); err != nil {
+	if err := db.SaveMoldAPICredentials(context.Background(), "api", "secret"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.SQLDB().Exec("UPDATE mold_api_credentials SET ciphertext = randomblob(length(ciphertext)) WHERE id = 1"); err != nil {
@@ -93,13 +86,15 @@ func TestMoldAPICredentialsMissingAndTampered(t *testing.T) {
 
 func TestDeleteMoldCredentialsRemovesOnlyCredentialRow(t *testing.T) {
 	dir := t.TempDir()
-	db, err := Open(context.Background(), testConfig(filepath.Join(dir, "netdive.db")))
+	cfg := testConfig(filepath.Join(dir, "netdive.db"))
+	writeTestManagementKey(t, cfg.ManagementKeyFile)
+	db, err := Open(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
 	ctx := context.Background()
-	if err := db.SaveMoldCredentials(ctx, "api", "secret", "db-password"); err != nil {
+	if err := db.SaveMoldAPICredentials(ctx, "api", "secret"); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.DeleteMoldCredentials(ctx); err != nil {
@@ -109,11 +104,36 @@ func TestDeleteMoldCredentialsRemovesOnlyCredentialRow(t *testing.T) {
 	if err != nil || apiConfigured {
 		t.Fatalf("API configured after delete = %v, err=%v", apiConfigured, err)
 	}
-	_, dbConfigured, err := db.LoadMoldDBPassword(ctx)
-	if err != nil || dbConfigured {
-		t.Fatalf("DB configured after delete = %v, err=%v", dbConfigured, err)
+	if _, err := os.Stat(db.managementKeyFile); err != nil {
+		t.Fatalf("CloudStack management key should be untouched: %v", err)
 	}
-	if _, err := os.Stat(db.credentialKeyFile); err != nil {
-		t.Fatalf("credential key should be retained: %v", err)
+}
+
+func TestDeleteMoldAPICredentialsRemovesAPIOnly(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testConfig(filepath.Join(dir, "netdive.db"))
+	writeTestManagementKey(t, cfg.ManagementKeyFile)
+	db, err := Open(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if err := db.SaveMoldAPICredentials(ctx, "api", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteMoldAPICredentials(ctx); err != nil {
+		t.Fatal(err)
+	}
+	_, _, apiConfigured, err := db.LoadMoldAPICredentials(ctx)
+	if err != nil || apiConfigured {
+		t.Fatalf("API configured after API delete = %v, err=%v", apiConfigured, err)
+	}
+}
+
+func writeTestManagementKey(t *testing.T, path string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte("cloudstack-management-key\n"), 0640); err != nil {
+		t.Fatal(err)
 	}
 }

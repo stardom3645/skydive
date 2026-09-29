@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -31,9 +30,7 @@ var (
 type MoldCredentialsStore interface {
 	LoadMoldAPICredentials(context.Context) (string, string, bool, error)
 	SaveMoldAPICredentials(context.Context, string, string) error
-	LoadMoldDBPassword(context.Context) (string, bool, error)
-	SaveMoldDBPassword(context.Context, string) error
-	SaveMoldCredentials(context.Context, string, string, string) error
+	DeleteMoldAPICredentials(context.Context) error
 	DeleteMoldCredentials(context.Context) error
 }
 
@@ -105,27 +102,36 @@ func MoldCredentialsConfigured() (bool, bool, error) {
 	if err != nil {
 		return false, false, err
 	}
-	_, dbConfigured, err := store.LoadMoldDBPassword(context.Background())
-	if err != nil {
-		return false, false, err
-	}
+	_, err = loadMoldDBSettingsFromConfig()
+	dbConfigured := err == nil
 	return apiConfigured, dbConfigured, nil
 }
 
-// WriteMoldCredentials stores all values in one encrypted SQLite payload. An
-// empty database password preserves the previously stored value.
-func WriteMoldCredentials(apiKey, secretKey, dbPassword string) error {
+// WriteMoldCredentials stores the API pair in encrypted SQLite. Mold's DB
+// password remains owned by CloudStack and is never copied into Netdive's DB.
+func WriteMoldCredentials(apiKey, secretKey string) error {
 	moldAPIKeysMu.RLock()
 	store := moldAPICredentialsStore
 	moldAPIKeysMu.RUnlock()
 	if store == nil {
 		return fmt.Errorf("encrypted Netdive credential store is not available")
 	}
-	return store.SaveMoldCredentials(context.Background(), apiKey, secretKey, dbPassword)
+	return store.SaveMoldAPICredentials(context.Background(), apiKey, secretKey)
 }
 
-// DeleteMoldCredentials removes only the encrypted Mold credential payload.
-// Netdive's database, encryption key, event history, and manual mappings stay intact.
+// DeleteMoldAPICredentials clears only the operator-managed API pair.
+func DeleteMoldAPICredentials() error {
+	moldAPIKeysMu.RLock()
+	store := moldAPICredentialsStore
+	moldAPIKeysMu.RUnlock()
+	if store == nil {
+		return fmt.Errorf("encrypted Netdive credential store is not available")
+	}
+	return store.DeleteMoldAPICredentials(context.Background())
+}
+
+// DeleteMoldCredentials removes only the encrypted Mold API credential payload.
+// Netdive's database, CloudStack configuration, event history, and mappings stay intact.
 func DeleteMoldCredentials() error {
 	moldAPIKeysMu.RLock()
 	store := moldAPICredentialsStore
@@ -136,22 +142,14 @@ func DeleteMoldCredentials() error {
 	return store.DeleteMoldCredentials(context.Background())
 }
 
-// ReadMoldDBPassword reads only from Netdive's encrypted SQLite store.
+// ReadMoldDBPassword reads and decrypts CloudStack's own db.properties value.
+// The plaintext is used in memory only and is never copied to Netdive SQLite.
 func ReadMoldDBPassword() (string, error) {
-	moldAPIKeysMu.RLock()
-	store := moldAPICredentialsStore
-	moldAPIKeysMu.RUnlock()
-	if store != nil {
-		password, configured, err := store.LoadMoldDBPassword(context.Background())
-		if err != nil {
-			return "", err
-		}
-		if configured {
-			return password, nil
-		}
-		return "", ErrMoldDBPasswordNotConfigured
+	settings, err := loadMoldDBSettingsFromConfig()
+	if err != nil {
+		return "", err
 	}
-	return "", fmt.Errorf("encrypted Netdive credential store is not available")
+	return settings.Password, nil
 }
 
 func GetMoldDBConfig() MoldDBConfig {
@@ -164,15 +162,14 @@ func GetMoldDBConfig() MoldDBConfig {
 }
 
 func OpenMoldDB() (*sql.DB, error) {
-	password, err := ReadMoldDBPassword()
+	settings, err := loadMoldDBSettingsFromConfig()
 	if err != nil {
 		return nil, err
 	}
-	return openMoldDBWithPassword(password)
+	return openMoldDB(settings.Config, settings.Password)
 }
 
-func openMoldDBWithPassword(password string) (*sql.DB, error) {
-	dbCfg := GetMoldDBConfig()
+func openMoldDB(dbCfg MoldDBConfig, password string) (*sql.DB, error) {
 	dsn := (&mysql.Config{
 		User: dbCfg.User, Passwd: password, Net: "tcp",
 		Addr: net.JoinHostPort(dbCfg.Host, strconv.Itoa(dbCfg.Port)), DBName: dbCfg.Name,
@@ -190,13 +187,9 @@ func openMoldDBWithPassword(password string) (*sql.DB, error) {
 	return db, nil
 }
 
-// TestMoldDBPassword verifies the configured Mold database endpoint without
-// persisting the supplied plaintext password.
-func TestMoldDBPassword(password string) error {
-	if strings.TrimSpace(password) == "" {
-		return ErrMoldDBPasswordNotConfigured
-	}
-	db, err := openMoldDBWithPassword(password)
+// TestMoldDBConnection verifies CloudStack's configured database endpoint.
+func TestMoldDBConnection() error {
+	db, err := OpenMoldDB()
 	if err != nil {
 		return err
 	}

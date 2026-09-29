@@ -4,12 +4,16 @@ import (
 	"bytes"
 	"context"
 	"log"
+	"os"
+	"path/filepath"
 	"testing"
+
+	"github.com/skydive-project/skydive/config"
 )
 
 type testMoldCredentialsStore struct {
-	apiKey, secretKey, dbPassword string
-	configured                    bool
+	apiKey, secretKey string
+	configured        bool
 }
 
 func (s *testMoldCredentialsStore) LoadMoldAPICredentials(context.Context) (string, string, bool, error) {
@@ -21,25 +25,13 @@ func (s *testMoldCredentialsStore) SaveMoldAPICredentials(_ context.Context, api
 	return nil
 }
 
-func (s *testMoldCredentialsStore) LoadMoldDBPassword(context.Context) (string, bool, error) {
-	return s.dbPassword, s.dbPassword != "", nil
-}
-
-func (s *testMoldCredentialsStore) SaveMoldDBPassword(_ context.Context, password string) error {
-	s.dbPassword = password
-	return nil
-}
-
-func (s *testMoldCredentialsStore) SaveMoldCredentials(_ context.Context, apiKey, secretKey, dbPassword string) error {
-	s.apiKey, s.secretKey, s.configured = apiKey, secretKey, true
-	if dbPassword != "" {
-		s.dbPassword = dbPassword
-	}
+func (s *testMoldCredentialsStore) DeleteMoldAPICredentials(context.Context) error {
+	s.apiKey, s.secretKey, s.configured = "", "", false
 	return nil
 }
 
 func (s *testMoldCredentialsStore) DeleteMoldCredentials(context.Context) error {
-	s.apiKey, s.secretKey, s.dbPassword, s.configured = "", "", "", false
+	s.apiKey, s.secretKey, s.configured = "", "", false
 	return nil
 }
 
@@ -64,34 +56,43 @@ func TestMoldAPIKeysRejectMissingEncryptedStore(t *testing.T) {
 	}
 }
 
-func TestWriteMoldCredentialsStoresDBPassword(t *testing.T) {
+func TestWriteMoldCredentialsStoresOnlyAPI(t *testing.T) {
 	store := &testMoldCredentialsStore{}
 	SetMoldAPICredentialsStore(store)
 	t.Cleanup(func() { SetMoldAPICredentialsStore(nil) })
 
-	if err := WriteMoldCredentials("api-value", "secret-value", "db-password"); err != nil {
+	if err := WriteMoldCredentials("api-value", "secret-value"); err != nil {
 		t.Fatal(err)
 	}
-	apiConfigured, dbConfigured, err := MoldCredentialsConfigured()
-	if err != nil || !apiConfigured || !dbConfigured {
-		t.Fatalf("configured status = api:%v db:%v err:%v", apiConfigured, dbConfigured, err)
-	}
-	password, err := ReadMoldDBPassword()
-	if err != nil || password != "db-password" {
-		t.Fatalf("DB password = %q, err=%v", password, err)
+	if store.apiKey != "api-value" || store.secretKey != "secret-value" || !store.configured {
+		t.Fatalf("API credentials were not stored: %+v", store)
 	}
 }
 
 func TestDeleteMoldCredentialsClearsConfiguredStatus(t *testing.T) {
-	store := &testMoldCredentialsStore{apiKey: "api", secretKey: "secret", dbPassword: "password", configured: true}
+	store := &testMoldCredentialsStore{apiKey: "api", secretKey: "secret", configured: true}
 	SetMoldAPICredentialsStore(store)
 	t.Cleanup(func() { SetMoldAPICredentialsStore(nil) })
 	if err := DeleteMoldCredentials(); err != nil {
 		t.Fatal(err)
 	}
+	if store.configured {
+		t.Fatal("API credentials still configured after delete")
+	}
+}
+
+func TestDeleteMoldAPICredentialsDoesNotTouchCloudStackFiles(t *testing.T) {
+	store := &testMoldCredentialsStore{apiKey: "api", secretKey: "secret", configured: true}
+	SetMoldAPICredentialsStore(store)
+	t.Cleanup(func() { SetMoldAPICredentialsStore(nil) })
+	propertiesPath, keyPath := writeTestMoldDBProperties(t, "db-password")
+	setMoldDBTestPaths(t, propertiesPath, keyPath)
+	if err := DeleteMoldAPICredentials(); err != nil {
+		t.Fatal(err)
+	}
 	apiConfigured, dbConfigured, err := MoldCredentialsConfigured()
-	if err != nil || apiConfigured || dbConfigured {
-		t.Fatalf("configured status after delete = api:%v db:%v err:%v", apiConfigured, dbConfigured, err)
+	if err != nil || apiConfigured || !dbConfigured {
+		t.Fatalf("configured status after API delete = api:%v db:%v err:%v", apiConfigured, dbConfigured, err)
 	}
 }
 
@@ -99,6 +100,7 @@ func TestUnconfiguredMoldDBCacheRefreshesStayQuiet(t *testing.T) {
 	store := &testMoldCredentialsStore{}
 	SetMoldAPICredentialsStore(store)
 	t.Cleanup(func() { SetMoldAPICredentialsStore(nil) })
+	setMoldDBTestPaths(t, filepath.Join(t.TempDir(), "missing.properties"), filepath.Join(t.TempDir(), "missing.key"))
 
 	var output bytes.Buffer
 	previousWriter := log.Writer()
@@ -112,4 +114,40 @@ func TestUnconfiguredMoldDBCacheRefreshesStayQuiet(t *testing.T) {
 	if output.Len() != 0 {
 		t.Fatalf("unconfigured Mold DB produced repeated cache logs: %s", output.String())
 	}
+}
+
+func setMoldDBTestPaths(t *testing.T, propertiesPath, keyPath string) {
+	t.Helper()
+	global := config.GetConfig()
+	oldProperties := config.GetString("mold.db.propertiesFile")
+	oldKey := config.GetString("mold.db.managementKeyFile")
+	global.Set("mold.db.propertiesFile", propertiesPath)
+	global.Set("mold.db.managementKeyFile", keyPath)
+	t.Cleanup(func() {
+		global.Set("mold.db.propertiesFile", oldProperties)
+		global.Set("mold.db.managementKeyFile", oldKey)
+	})
+}
+
+func writeTestMoldDBProperties(t *testing.T, password string) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	propertiesPath := filepath.Join(dir, "db.properties")
+	keyPath := filepath.Join(dir, "key")
+	managementKey := "test-management-key"
+	encoded := encryptCloudStackV2ForTest(t, password, managementKey)
+	contents := "db.cloud.username=cloud\n" +
+		"db.cloud.password=ENC(" + encoded + ")\n" +
+		"db.cloud.host=localhost\n" +
+		"db.cloud.port=3306\n" +
+		"db.cloud.name=cloud\n" +
+		"db.cloud.encryption.type=file\n" +
+		"db.cloud.encryptor.version=V2\n"
+	if err := os.WriteFile(propertiesPath, []byte(contents), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, []byte(managementKey+"\n"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	return propertiesPath, keyPath
 }

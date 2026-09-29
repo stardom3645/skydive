@@ -21,7 +21,7 @@ func testConfig(path string) Config {
 		Path:              path,
 		JournalMode:       "WAL",
 		BusyTimeout:       3210,
-		CredentialKeyFile: filepath.Join(filepath.Dir(path), "netdive-credential-key"),
+		ManagementKeyFile: filepath.Join(filepath.Dir(path), "cloudstack-management-key"),
 	}
 }
 
@@ -33,17 +33,17 @@ func TestConfigFromGlobal(t *testing.T) {
 		global.Set("custom.database.path", old.Path)
 		global.Set("custom.database.journalMode", old.JournalMode)
 		global.Set("custom.database.busyTimeout", old.BusyTimeout)
-		global.Set("custom.database.credentialKeyFile", old.CredentialKeyFile)
+		global.Set("mold.db.managementKeyFile", old.ManagementKeyFile)
 	}()
 
 	global.Set("custom.database.driver", "sqlite3")
 	global.Set("custom.database.path", "/tmp/configured-netdive.db")
 	global.Set("custom.database.journalMode", "WAL")
 	global.Set("custom.database.busyTimeout", 4321)
-	global.Set("custom.database.credentialKeyFile", "/tmp/netdive-credential-key")
+	global.Set("mold.db.managementKeyFile", "/etc/cloudstack/management/key")
 
 	got := ConfigFromGlobal()
-	if got.Driver != "sqlite3" || got.Path != "/tmp/configured-netdive.db" || got.JournalMode != "WAL" || got.BusyTimeout != 4321 || got.CredentialKeyFile != "/tmp/netdive-credential-key" {
+	if got.Driver != "sqlite3" || got.Path != "/tmp/configured-netdive.db" || got.JournalMode != "WAL" || got.BusyTimeout != 4321 || got.ManagementKeyFile != "/etc/cloudstack/management/key" {
 		t.Fatalf("unexpected custom.database config: %+v", got)
 	}
 }
