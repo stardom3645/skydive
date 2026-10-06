@@ -897,6 +897,8 @@ func listMoldKubernetesClusters() ([]moldKubernetesCluster, error) {
 	body, _, err := requestMoldAPI(moldKubernetesListCommand, []apiParam{
 		{Key: "command", Value: moldKubernetesListCommand},
 		{Key: "response", Value: "json"},
+		// Include other owners' clusters within the API account's permissions.
+		{Key: "listall", Value: "true"},
 	})
 	if err != nil {
 		return nil, err
