@@ -36,6 +36,9 @@ const (
 type moldKubernetesCluster struct {
 	ID                string `json:"id"`
 	Name              string `json:"name"`
+	AccountName       string `json:"accountName,omitempty"`
+	DomainName        string `json:"domainName,omitempty"`
+	ProjectName       string `json:"projectName,omitempty"`
 	State             string `json:"state"`
 	APIServer         string `json:"apiServer"`
 	Description       string `json:"description,omitempty"`
@@ -1018,6 +1021,9 @@ func parseMoldKubernetesClusters(body []byte) ([]moldKubernetesCluster, error) {
 		clusters = append(clusters, moldKubernetesCluster{
 			ID:              valueAsString(m["id"]),
 			Name:            valueAsString(m["name"]),
+			AccountName:     firstNonEmpty(valueAsString(m["account"]), valueAsString(m["accountName"])),
+			DomainName:      firstNonEmpty(valueAsString(m["domain"]), valueAsString(m["domainName"])),
+			ProjectName:     firstNonEmpty(valueAsString(m["project"]), valueAsString(m["projectName"])),
 			State:           valueAsString(m["state"]),
 			APIServer:       firstNonEmpty(valueAsString(m["endpoint"]), valueAsString(m["apiserver"]), valueAsString(m["apiServer"])),
 			Description:     valueAsString(m["description"]),

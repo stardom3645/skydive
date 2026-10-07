@@ -32,7 +32,7 @@ func TestListMoldKubernetesClustersIncludesOtherOwners(t *testing.T) {
 			_, _ = w.Write([]byte(`{"listkubernetesclustersresponse":{"count":0}}`))
 			return
 		}
-		_, _ = w.Write([]byte(`{"listkubernetesclustersresponse":{"count":1,"kubernetescluster":[{"id":"other-owner-cluster","name":"shared-cluster","state":"Running"}]}}`))
+		_, _ = w.Write([]byte(`{"listkubernetesclustersresponse":{"count":1,"kubernetescluster":[{"id":"other-owner-cluster","name":"shared-cluster","state":"Running","account":"team-user","domain":"ROOT","project":"team-project"}]}}`))
 	}))
 	defer mold.Close()
 
@@ -50,5 +50,18 @@ func TestListMoldKubernetesClustersIncludesOtherOwners(t *testing.T) {
 	}
 	if len(clusters) != 1 || clusters[0].ID != "other-owner-cluster" {
 		t.Fatalf("other owner's authorized cluster missing: %#v", clusters)
+	}
+	if clusters[0].AccountName != "team-user" || clusters[0].DomainName != "ROOT" || clusters[0].ProjectName != "team-project" {
+		t.Fatalf("cluster ownership was not preserved: %#v", clusters[0])
+	}
+}
+
+func TestParseMoldKubernetesClustersWithoutOwnership(t *testing.T) {
+	clusters, err := parseMoldKubernetesClusters([]byte(`{"listkubernetesclustersresponse":{"kubernetescluster":[{"id":"legacy","name":"legacy-cluster"}]}}`))
+	if err != nil || len(clusters) != 1 {
+		t.Fatalf("legacy response failed: clusters=%#v err=%v", clusters, err)
+	}
+	if clusters[0].AccountName != "" || clusters[0].DomainName != "" || clusters[0].ProjectName != "" {
+		t.Fatalf("missing ownership must remain unknown: %#v", clusters[0])
 	}
 }
