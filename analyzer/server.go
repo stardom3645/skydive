@@ -453,6 +453,7 @@ func NewServerFromConfig() (*Server, error) {
 	api.RegisterVMDetailMapAPI(httpServer, common.GetVMDetailMap, vmNetworkRefreshInterval)
 	api.RegisterMoldVMConsoleAPI(httpServer)
 	api.RegisterMoldCredentialsAPI(httpServer, apiAuthBackend)
+	api.RegisterMoldRelatedServicesAPI(httpServer, apiAuthBackend)
 	api.RegisterMoldKubernetesAPI(httpServer, startMoldKubernetesProbe(g, probeBundle), stopMoldKubernetesProbe(probeBundle), isMoldKubernetesProbeRunning(probeBundle))
 	api.RegisterMoldHostDetailAPI(httpServer)
 	api.RegisterMoldManagementServerAPI(httpServer)
