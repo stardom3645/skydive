@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	shttp "github.com/skydive-project/skydive/graffiti/http"
@@ -67,6 +69,8 @@ func RegisterWallHostTrendAPI(httpServer *shttp.Server) {
 }
 
 func handleWallHostTrend(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+	defer cancel()
 	host := strings.TrimSpace(r.URL.Query().Get("host"))
 	name := strings.TrimSpace(r.URL.Query().Get("name"))
 	managementIP := strings.TrimSpace(r.URL.Query().Get("managementIp"))
@@ -94,13 +98,14 @@ func handleWallHostTrend(w http.ResponseWriter, r *http.Request) {
 	queryTemplates := wallHostTrendQueryTemplates()
 	series := make([]wallHostTrendSeries, 0, len(queryTemplates))
 	warnings := make([]string, 0)
+	rootDisk := startWallRootDiskQueries(ctx, client, prometheusURL, prometheusInstances, "", prometheusJob, start, end, step)
 
 	for _, item := range queryTemplates {
 		var lastErr error
 
 		for _, instance := range prometheusInstances {
 			item.Query = wallHostTrendQuery(item.Key, instance, prometheusJob)
-			result, err := queryPrometheusRange(client, prometheusURL, item.Query, start, end, step)
+			result, err := queryPrometheusRange(ctx, client, prometheusURL, item.Query, start, end, step)
 			if err != nil {
 				lastErr = err
 				continue
@@ -128,6 +133,7 @@ func handleWallHostTrend(w http.ResponseWriter, r *http.Request) {
 
 		series = append(series, item)
 	}
+	series = append(series, (<-rootDisk)...)
 
 	writeWallHostTrendJSON(w, http.StatusOK, wallHostTrendResponse{
 		Host:     firstNonEmptyString(host, name, managementIP, ip),
@@ -142,6 +148,8 @@ func handleWallHostTrend(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleWallVMTrend(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+	defer cancel()
 	name := strings.TrimSpace(r.URL.Query().Get("name"))
 	domain := strings.TrimSpace(r.URL.Query().Get("domain"))
 	instanceName := strings.TrimSpace(r.URL.Query().Get("instanceName"))
@@ -170,10 +178,11 @@ func handleWallVMTrend(w http.ResponseWriter, r *http.Request) {
 	queryTemplates := wallHostTrendQueryTemplates()
 	series := make([]wallHostTrendSeries, 0, len(queryTemplates))
 	warnings := make([]string, 0)
+	rootDisk := startWallRootDiskQueries(ctx, client, prometheusURL, nil, domainRegex, "", start, end, step)
 
 	for _, item := range queryTemplates {
 		item.Query = wallVMTrendQuery(item.Key, domainRegex)
-		result, err := queryPrometheusRange(client, prometheusURL, item.Query, start, end, step)
+		result, err := queryPrometheusRange(ctx, client, prometheusURL, item.Query, start, end, step)
 		if err != nil {
 			item.Values = []wallHostTrendPoint{}
 			warnings = append(warnings, fmt.Sprintf("%s query failed: %s", item.Key, err.Error()))
@@ -194,6 +203,7 @@ func handleWallVMTrend(w http.ResponseWriter, r *http.Request) {
 		item.LastValue = lastTrendValue(points)
 		series = append(series, item)
 	}
+	series = append(series, (<-rootDisk)...)
 
 	writeWallHostTrendJSON(w, http.StatusOK, wallHostTrendResponse{
 		Host:     firstNonEmptyString(domain, instanceName, name, vmID, uuid, displayName),
@@ -223,6 +233,17 @@ func wallHostTrendQuery(key, prometheusInstance, prometheusJob string) string {
 	networkDeviceFilter := `device!~"lo|veth.*|docker.*|br.*|virbr.*|tap.*"`
 
 	switch key {
+	case "rootDiskTotal", "rootDiskUsed", "rootDiskAvailable":
+		selector := fmt.Sprintf(`{instance=%q, job=%q, mountpoint="/", fstype!="rootfs"}`, prometheusInstance, prometheusJob)
+		total := "node_filesystem_size_bytes" + selector
+		available := "node_filesystem_avail_bytes" + selector
+		if key == "rootDiskUsed" {
+			return total + " - " + available
+		}
+		if key == "rootDiskAvailable" {
+			return available
+		}
+		return total
 	case "cpu":
 		return fmt.Sprintf(
 			`sum (sum by (mode) (irate(node_cpu_seconds_total{instance="%s", job="%s", mode=~"(irq|nice|softirq|steal|system|user|iowait)"}[1m])) / scalar(sum(irate(node_cpu_seconds_total{instance="%s", job="%s"}[1m]))) * 100)`,
@@ -286,6 +307,17 @@ func wallHostTrendQuery(key, prometheusInstance, prometheusJob string) string {
 
 func wallVMTrendQuery(key, domainRegex string) string {
 	switch key {
+	case "rootDiskTotal", "rootDiskUsed", "rootDiskAvailable":
+		selector := fmt.Sprintf(`{domain=~"%s", partition_mountpoint="/"}`, domainRegex)
+		total := "libvirt_domain_fs_info_total_bytes" + selector
+		used := "libvirt_domain_fs_info_usage_bytes" + selector
+		if key == "rootDiskUsed" {
+			return used
+		}
+		if key == "rootDiskAvailable" {
+			return total + " - on (domain, instance, job, partition_mountpoint, partition_name, partition_type, serial) " + used
+		}
+		return total
 	case "cpu":
 		return fmt.Sprintf(
 			`avg(rate(libvirt_domain_info_cpu_time_seconds_total{domain=~"%s"}[1m]) / on (domain, instance) count(libvirt_domain_vcpu_cpu{}) by (instance, domain) * 100)`,
@@ -325,7 +357,78 @@ func wallVMTrendQuery(key, domainRegex string) string {
 	}
 }
 
-func queryPrometheusRange(client *http.Client, prometheusURL, query string, start, end time.Time, step time.Duration) (*prometheusQueryRangeResponse, error) {
+// Fetch the small filesystem series alongside the existing trends, so adding
+// capacity does not add three sequential round trips per topology card.
+func startWallRootDiskQueries(ctx context.Context, client *http.Client, prometheusURL string, instances []string, domainRegex, job string, start, end time.Time, step time.Duration) <-chan []wallHostTrendSeries {
+	ready := make(chan []wallHostTrendSeries, 1)
+	go func() {
+		items := []wallHostTrendSeries{
+			{Key: "rootDiskTotal", Label: "Root Disk Total", Unit: "bytes"},
+			{Key: "rootDiskUsed", Label: "Root Disk Used", Unit: "bytes"},
+			{Key: "rootDiskAvailable", Label: "Root Disk Available", Unit: "bytes"},
+		}
+		if domainRegex != "" {
+			instances = []string{""}
+		}
+		for _, instance := range instances {
+			var pending sync.WaitGroup
+			results := make([]*prometheusQueryRangeResponse, len(items))
+			for i := range items {
+				pending.Add(1)
+				go func(index int) {
+					defer pending.Done()
+					item := &items[index]
+					item.Query = wallHostTrendQuery(item.Key, instance, job)
+					if domainRegex != "" {
+						item.Query = wallVMTrendQuery(item.Key, domainRegex)
+					}
+					item.Values = []wallHostTrendPoint{}
+					item.LastValue = nil
+					item.Labels = nil
+					if result, err := queryPrometheusRange(ctx, client, prometheusURL, item.Query, start, end, step); err == nil {
+						results[index] = result
+					}
+				}(i)
+			}
+			pending.Wait()
+			for i := range items {
+				items[i].Values, items[i].Labels = pickWallRootDiskSeries(results[i], items[0].Labels)
+				items[i].LastValue = lastTrendValue(items[i].Values)
+			}
+			// Keep total/used/available on the same exporter; never combine hosts.
+			if items[0].LastValue != nil || ctx.Err() != nil {
+				break
+			}
+		}
+		ready <- items
+	}()
+	return ready
+}
+
+func pickWallRootDiskSeries(result *prometheusQueryRangeResponse, totalLabels map[string]interface{}) ([]wallHostTrendPoint, map[string]interface{}) {
+	if result == nil || totalLabels == nil {
+		return pickPrometheusSeries(result)
+	}
+	// A VM can migrate between exporters. Match the total's filesystem rather
+	// than accidentally using another domain/device's usage or free space.
+	filtered := *result
+	filtered.Data.Result = nil
+	for _, item := range result.Data.Result {
+		matches := true
+		for _, key := range []string{"instance", "job", "domain", "mountpoint", "device", "fstype", "partition_mountpoint", "partition_name", "partition_type", "serial"} {
+			if fmt.Sprint(item.Metric[key]) != fmt.Sprint(totalLabels[key]) {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			filtered.Data.Result = append(filtered.Data.Result, item)
+		}
+	}
+	return pickPrometheusSeries(&filtered)
+}
+
+func queryPrometheusRange(ctx context.Context, client *http.Client, prometheusURL, query string, start, end time.Time, step time.Duration) (*prometheusQueryRangeResponse, error) {
 	baseURL, err := url.Parse(strings.TrimRight(prometheusURL, "/") + "/api/v1/query_range")
 	if err != nil {
 		return nil, err
@@ -338,7 +441,7 @@ func queryPrometheusRange(client *http.Client, prometheusURL, query string, star
 	params.Set("step", strconv.Itoa(int(step.Seconds())))
 	baseURL.RawQuery = params.Encode()
 
-	req, err := http.NewRequest(http.MethodGet, baseURL.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}
