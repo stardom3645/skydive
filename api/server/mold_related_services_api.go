@@ -51,6 +51,7 @@ type moldCubeHost struct {
 func RegisterMoldRelatedServicesAPI(httpServer *shttp.Server, authBackend shttp.AuthenticationBackend) {
 	httpServer.RegisterRoutes([]shttp.Route{
 		{Name: "MoldRelatedServices", Method: "GET", Path: "/api/mold/related-services", HandlerFunc: handleMoldRelatedServices},
+		{Name: "MoldNetworks", Method: "GET", Path: "/api/mold/networks", HandlerFunc: handleMoldNetworks},
 		{Name: "MoldCubeHosts", Method: "GET", Path: "/api/mold/hosts", HandlerFunc: handleMoldCubeHosts},
 	}, authBackend)
 }
@@ -61,6 +62,13 @@ func allowMoldPortalRead(w http.ResponseWriter, r *auth.AuthenticatedRequest) bo
 		return false
 	}
 	return true
+}
+
+func handleMoldNetworks(w http.ResponseWriter, r *auth.AuthenticatedRequest) {
+	if !allowMoldPortalRead(w, r) {
+		return
+	}
+	writeMoldCredentialsJSON(w, http.StatusOK, map[string]interface{}{"networks": common.GetMoldNetworkCatalog()})
 }
 
 func handleMoldRelatedServices(w http.ResponseWriter, r *auth.AuthenticatedRequest) {

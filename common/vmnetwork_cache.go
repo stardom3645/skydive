@@ -11,6 +11,12 @@ import (
 )
 
 type VMNetworkInfo struct {
+	VMUUID          string `json:"vmUuid"`
+	NetworkID       string `json:"networkId"`
+	NICID           string `json:"nicId"`
+	VLAN            string `json:"vlan"`
+	ZoneID          string `json:"zoneId"`
+	ZoneName        string `json:"zoneName"`
 	NetworkName     string `json:"networkName"`
 	MACAddress      string `json:"macAddress"`
 	IPAddress       string `json:"ipAddress"`
@@ -68,9 +74,10 @@ func LoadVMNetworkMapFromCloudstack() {
 			&item.BroadcastURI,
 			&item.IsDefault,
 			&item.NetworkOffering,
+			&item.VMUUID, &item.NetworkID, &item.NICID, &item.VLAN, &item.ZoneID, &item.ZoneName,
 		); scanErr != nil {
 			log.Printf("DB scan failed for vm network map: %v", scanErr)
-			continue
+			return
 		}
 		if instanceName == "" {
 			continue
@@ -78,8 +85,19 @@ func LoadVMNetworkMapFromCloudstack() {
 		temp[instanceName] = append(temp[instanceName], item)
 	}
 
+	if err := rows.Err(); err != nil {
+		log.Printf("DB read failed for vm network map: %v", err)
+		return
+	}
+
+	catalog, err := loadMoldNetworkCatalog(db)
+	if err != nil {
+		log.Printf("DB read failed for Mold networks: %v", err)
+		return
+	}
 	vmNetworkMapLock.Lock()
 	vmNetworkMap = temp
+	moldNetworkCatalog = catalog
 	vmNetworkLastLoad = time.Now()
 	vmNetworkMapLock.Unlock()
 }
@@ -103,12 +121,39 @@ func buildVMNetworkMapQuery(db *sql.DB) string {
 		}
 	}
 
+	zoneColumns := moldTableColumns(db, "data_center")
+	return buildVMNetworkMapSQL(vmColumns, nicColumns, networkColumns, offeringColumns, zoneColumns, offeringTable)
+}
+
+func buildVMNetworkMapSQL(vmColumns, nicColumns, networkColumns, offeringColumns, zoneColumns map[string]bool, offeringTable string) string {
+	if !vmColumns["id"] || !nicColumns["instance_id"] {
+		return ""
+	}
+	if !nicColumns["network_id"] || !networkColumns["id"] {
+		networkColumns = map[string]bool{}
+	}
+	if !networkColumns["network_offering_id"] || offeringTable == "" {
+		offeringColumns = map[string]bool{}
+		offeringTable = ""
+	}
 	joins := []string{"JOIN nics n ON n.instance_id = v.id"}
 	if len(networkColumns) > 0 && nicColumns["network_id"] {
 		joins = append(joins, "LEFT JOIN networks net ON net.id = n.network_id")
 	}
 	if offeringTable != "" && networkColumns["network_offering_id"] {
 		joins = append(joins, fmt.Sprintf("LEFT JOIN %s no ON no.id = net.network_offering_id", offeringTable))
+	}
+
+	zoneSource := ""
+	if len(networkColumns) > 0 && nicColumns["network_id"] && networkColumns["data_center_id"] {
+		zoneSource = "net.data_center_id"
+	} else if vmColumns["data_center_id"] {
+		zoneSource = "v.data_center_id"
+	}
+	if zoneSource != "" && zoneColumns["id"] {
+		joins = append(joins, "LEFT JOIN data_center zone ON zone.id = "+zoneSource)
+	} else {
+		zoneColumns = map[string]bool{}
 	}
 
 	where := []string{}
@@ -133,11 +178,17 @@ func buildVMNetworkMapQuery(db *sql.DB) string {
 	networkTypeExpr := moldCoalesceExpression("net", networkColumns, []string{"guest_type", "network_type", "type"}, "''")
 	trafficTypeExpr := moldCoalesceExpression("net", networkColumns, []string{"traffic_type"}, "''")
 	gatewayExpr := moldCoalesceExpression("n", nicColumns, []string{"gateway"}, moldCoalesceExpression("net", networkColumns, []string{"gateway"}, "''"))
-	cidrExpr := moldCoalesceExpression("net", networkColumns, []string{"cidr", "network_cidr"}, moldCoalesceExpression("n", nicColumns, []string{"netmask"}, "''"))
+	cidrExpr := moldCoalesceExpression("net", networkColumns, []string{"cidr", "network_cidr"}, "''")
 	broadcastURIExpr := moldCoalesceExpression("net", networkColumns, []string{"broadcast_uri", "broadcast_domain_type", "vlan_id"}, "''")
 	isDefaultExpr := moldCoalesceExpression("n", nicColumns, []string{"default_nic", "is_default", "primary_nic"}, "''")
 	networkOfferingExpr := moldCoalesceExpression("no", offeringColumns, []string{"name", "display_text", "unique_name"}, "''")
 
+	vmUUIDExpr := moldCoalesceExpression("v", vmColumns, []string{"uuid"}, "''")
+	networkIDExpr := moldCoalesceExpression("net", networkColumns, []string{"uuid", "id"}, "''")
+	nicIDExpr := moldCoalesceExpression("n", nicColumns, []string{"uuid", "id"}, "''")
+	vlanExpr := moldCoalesceExpression("net", networkColumns, []string{"vlan_id"}, "''")
+	zoneIDExpr := moldCoalesceExpression("zone", zoneColumns, []string{"uuid", "id"}, "''")
+	zoneNameExpr := moldCoalesceExpression("zone", zoneColumns, []string{"name"}, "''")
 	orderExpr := "v.id DESC"
 	if nicColumns["id"] {
 		orderExpr += ", n.id DESC"
@@ -154,7 +205,8 @@ func buildVMNetworkMapQuery(db *sql.DB) string {
 		       %s,
 		       %s,
 		       %s,
-		       %s
+		       %s,
+		       %s, %s, %s, %s, %s, %s
 		FROM vm_instance v
 		%s
 		%s
@@ -170,6 +222,7 @@ func buildVMNetworkMapQuery(db *sql.DB) string {
 		broadcastURIExpr,
 		isDefaultExpr,
 		networkOfferingExpr,
+		vmUUIDExpr, networkIDExpr, nicIDExpr, vlanExpr, zoneIDExpr, zoneNameExpr,
 		strings.Join(joins, "\n\t\t"),
 		whereClause,
 		orderExpr,
