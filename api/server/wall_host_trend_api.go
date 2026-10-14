@@ -175,6 +175,21 @@ func handleWallVMTrend(w http.ResponseWriter, r *http.Request) {
 
 	prometheusURL := wallPrometheusURL()
 	client := &http.Client{Timeout: 10 * time.Second}
+	exporter, exporterErr := resolveWallSystemVMExporter(ctx, client, prometheusURL,
+		firstNonEmptyString(domain, instanceName, name), r.URL.Query().Get("guestMAC"), end)
+	if exporterErr != nil {
+		missing := wallHostTrendQueryTemplates()
+		for i := range missing {
+			missing[i].Values = []wallHostTrendPoint{}
+		}
+		writeWallHostTrendJSON(w, http.StatusOK, wallHostTrendResponse{Host: firstNonEmptyString(domain, instanceName, name), Range: trendRange.String(), Step: step.String(),
+			Start: start.Unix(), End: end.Unix(), Series: missing, Warnings: []string{"system VM exporter lookup failed: " + exporterErr.Error()}})
+		return
+	}
+	if exporter != nil {
+		writeWallHostTrendJSON(w, http.StatusOK, wallSystemVMTrend(ctx, client, prometheusURL, firstNonEmptyString(domain, instanceName, name), *exporter, start, end, step))
+		return
+	}
 	queryTemplates := wallHostTrendQueryTemplates()
 	series := make([]wallHostTrendSeries, 0, len(queryTemplates))
 	warnings := make([]string, 0)
