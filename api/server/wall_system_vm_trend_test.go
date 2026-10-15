@@ -14,9 +14,9 @@ import (
 func TestWallSystemVMExporterIdentity(t *testing.T) {
 	now := time.Now()
 	for _, scenario := range []struct {
-		name, domain, mac, want string
-		count                   int
-		stale, macOnly, failure bool
+		name, domain, mac, want, job string
+		count                        int
+		stale, macOnly, failure      bool
 	}{
 		{name: "exact hostname", domain: "ccvm", want: "10.10.31.10:3003", count: 1},
 		{name: "guest MAC selects one storage VM", domain: "scvm", mac: "52:54:00:11:22:33", want: "10.10.1.12:3003", count: 1, macOnly: true},
@@ -25,7 +25,11 @@ func TestWallSystemVMExporterIdentity(t *testing.T) {
 		{name: "missing", domain: "ccvm", count: 0},
 		{name: "stale exporter", domain: "ccvm", count: 1, stale: true},
 		{name: "Mold domain does not use system job", domain: "i-2-42-VM", count: 1},
-		{name: "Mold system VM remains a domain", domain: "s-173-VM", count: 1},
+		{name: "Mold storage VM exact hostname", domain: "s-173-VM", want: "10.10.31.8:3003", job: "mold-system-vms", count: 1},
+		{name: "Mold console VM exact MAC", domain: "v-174-VM", mac: "52:54:00:11:22:33", want: "10.10.31.7:3003", job: "console-guest", count: 1, macOnly: true},
+		{name: "Mold storage exporter missing", domain: "s-173-VM", count: 0},
+		{name: "Mold console exporter ambiguous", domain: "v-174-VM", job: "console-guest", count: 2},
+		{name: "Mold router remains libvirt", domain: "r-192-VM", count: 1},
 		{name: "Prometheus failure", domain: "ccvm", failure: true},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
@@ -40,7 +44,7 @@ func TestWallSystemVMExporterIdentity(t *testing.T) {
 				if scenario.macOnly && (!strings.Contains(query, "node_network_info") || !strings.Contains(query, `address=~"52:54:00:11:22:33"`)) {
 					t.Errorf("must resolve the exact guest MAC: %s", query)
 				}
-				if !scenario.macOnly && !strings.Contains(query, `nodename="ccvm"`) {
+				if !scenario.macOnly && !strings.Contains(query, `nodename="`+scenario.domain+`"`) {
 					t.Errorf("must resolve the exact hostname: %s", query)
 				}
 				result := []interface{}{}
@@ -54,6 +58,12 @@ func TestWallSystemVMExporterIdentity(t *testing.T) {
 					if scenario.macOnly {
 						instance = "10.10.1.12:3003"
 						job = "scvm"
+					}
+					if scenario.want != "" {
+						instance = scenario.want
+					}
+					if scenario.job != "" {
+						job = scenario.job
 					}
 					if i > 0 {
 						instance = "10.10.1.13:3003"
@@ -77,12 +87,58 @@ func TestWallSystemVMExporterIdentity(t *testing.T) {
 			} else if got != nil || err != nil {
 				t.Fatalf("missing data must stay missing: %#v, %v", got, err)
 			}
-			if strings.HasPrefix(scenario.domain, "i-") || strings.HasPrefix(scenario.domain, "s-") {
+			if strings.HasPrefix(scenario.domain, "i-") || strings.HasPrefix(scenario.domain, "r-") {
 				if queries != 0 {
 					t.Fatal("Mold VM domains must retain their existing libvirt path")
 				}
 			}
 		})
+	}
+}
+
+func TestWallMoldSystemVMExporterAmbiguousJobs(t *testing.T) {
+	now := time.Now()
+	prom := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query().Get("query")
+		if !strings.Contains(query, `node_uname_info{nodename="s-173-VM"}`) {
+			t.Errorf("Mold jobs must be resolved by exact guest identity: %s", query)
+		}
+		result := []interface{}{}
+		for _, job := range []string{"system-vms", "storage-vms"} {
+			result = append(result, map[string]interface{}{"metric": map[string]string{"instance": "10.10.31.8:3003", "job": job}, "values": [][]interface{}{{now.Unix(), "1"}}})
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"status": "success", "data": map[string]interface{}{"resultType": "matrix", "result": result}})
+	}))
+	defer prom.Close()
+	got, err := resolveWallSystemVMExporter(context.Background(), prom.Client(), prom.URL, "s-173-VM", "", now)
+	if got != nil || err == nil {
+		t.Fatal("duplicate instance across jobs must not choose one arbitrarily")
+	}
+}
+
+func TestWallMoldSystemVMTrendExactGuest(t *testing.T) {
+	now := time.Now()
+	prom := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query().Get("query")
+		if !strings.Contains(query, `instance="10.10.31.8:3003"`) || !strings.Contains(query, `job="mold-system-vms"`) || strings.Contains(query, "libvirt_") {
+			t.Errorf("Mold guest trends must retain resolved node exporter identity: %s", query)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"status": "success", "data": map[string]interface{}{"resultType": "matrix", "result": []interface{}{map[string]interface{}{
+			"metric": map[string]string{"instance": "10.10.31.8:3003", "job": "mold-system-vms", "mountpoint": "/"}, "values": [][]interface{}{{now.Unix(), "0"}},
+		}}}})
+	}))
+	defer prom.Close()
+	response := wallSystemVMTrend(context.Background(), prom.Client(), prom.URL, "s-173-VM", wallGuestExporter{instance: "10.10.31.8:3003", job: "mold-system-vms"}, now.Add(-time.Hour), now, time.Minute)
+	if len(response.Warnings) > 0 || response.RawLabels["source"] != "node_exporter" {
+		t.Fatalf("unexpected guest response: %#v", response)
+	}
+	for _, metric := range response.Series {
+		if metric.LastValue == nil || *metric.LastValue != 0 {
+			t.Fatal("measured zero must be preserved")
+		}
+		if (metric.Key == "networkRx" || metric.Key == "networkTx") && metric.Unit != "bps" {
+			t.Fatal("node exporter network rates must retain API bit/s units")
+		}
 	}
 }
 

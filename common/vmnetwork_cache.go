@@ -11,22 +11,23 @@ import (
 )
 
 type VMNetworkInfo struct {
-	VMUUID          string `json:"vmUuid"`
-	NetworkID       string `json:"networkId"`
-	NICID           string `json:"nicId"`
-	VLAN            string `json:"vlan"`
-	ZoneID          string `json:"zoneId"`
-	ZoneName        string `json:"zoneName"`
-	NetworkName     string `json:"networkName"`
-	MACAddress      string `json:"macAddress"`
-	IPAddress       string `json:"ipAddress"`
-	NetworkType     string `json:"networkType"`
-	TrafficType     string `json:"trafficType"`
-	Gateway         string `json:"gateway"`
-	CIDR            string `json:"cidr"`
-	BroadcastURI    string `json:"broadcastUri"`
-	IsDefault       string `json:"isDefault"`
-	NetworkOffering string `json:"networkOffering"`
+	VMUUID           string `json:"vmUuid"`
+	NetworkID        string `json:"networkId"`
+	NICID            string `json:"nicId"`
+	VLAN             string `json:"vlan"`
+	ZoneID           string `json:"zoneId"`
+	ZoneName         string `json:"zoneName"`
+	NetworkName      string `json:"networkName"`
+	MACAddress       string `json:"macAddress"`
+	IPAddress        string `json:"ipAddress"`
+	NetworkType      string `json:"networkType"`
+	TrafficType      string `json:"trafficType"`
+	Gateway          string `json:"gateway"`
+	CIDR             string `json:"cidr"`
+	BroadcastURI     string `json:"broadcastUri"`
+	IsDefault        string `json:"isDefault"`
+	NetworkOffering  string `json:"networkOffering"`
+	NetworkCreatedAt string `json:"networkCreatedAt,omitempty"`
 }
 
 var (

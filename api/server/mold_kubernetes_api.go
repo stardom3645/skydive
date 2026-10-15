@@ -1383,5 +1383,6 @@ func RegisterMoldKubernetesAPI(httpServer *shttp.Server, startProbe moldKubernet
 	httpServer.Router.HandleFunc("/api/mold/kubernetes-clusters/nodes/detail", handleMoldKubernetesNodeDetail).Methods("GET")
 	httpServer.Router.HandleFunc("/api/mold/kubernetes-clusters/namespaces/detail", handleMoldKubernetesNamespaceDetail).Methods("GET")
 	httpServer.Router.HandleFunc("/api/mold/kubernetes-clusters/pods/detail", handleMoldKubernetesPodDetail).Methods("GET")
+	httpServer.Router.HandleFunc("/api/mold/kubernetes-clusters/pods/logs", handleMoldKubernetesPodLogs).Methods("GET")
 	httpServer.Router.HandleFunc("/api/mold/kubernetes-clusters/services/detail", handleMoldKubernetesServiceDetail).Methods("GET")
 }

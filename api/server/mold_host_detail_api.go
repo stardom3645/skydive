@@ -76,6 +76,7 @@ type moldHostLookupParams struct {
 
 func RegisterMoldHostDetailAPI(httpServer *shttp.Server) {
 	httpServer.Router.HandleFunc("/api/mold/hosts/detail", handleMoldHostDetail).Methods("GET")
+	httpServer.Router.HandleFunc("/api/mold/system-vms/detail", handleMoldSystemVMDetail).Methods("GET")
 }
 
 func handleMoldHostDetail(w http.ResponseWriter, r *http.Request) {

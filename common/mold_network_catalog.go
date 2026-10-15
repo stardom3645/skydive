@@ -3,6 +3,7 @@ package common
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 )
 
 var moldNetworkCatalog = []VMNetworkInfo{}
@@ -26,10 +27,26 @@ func loadMoldNetworkCatalog(db *sql.DB) ([]VMNetworkInfo, error) {
 		where = "WHERE net.removed IS NULL"
 	}
 	expr := func(names ...string) string { return moldCoalesceExpression("net", columns, names, "''") }
-	query := fmt.Sprintf("SELECT %s, %s, %s, %s, %s, %s, %s, %s FROM networks net %s %s ORDER BY net.id",
-		expr("uuid", "id"), expr("name", "display_text"), expr("guest_type", "network_type", "type"), expr("cidr", "network_cidr"),
+	nameExpressions := []string{}
+	for _, column := range []string{"name", "display_text"} {
+		if columns[column] {
+			nameExpressions = append(nameExpressions, "NULLIF(TRIM(net."+column+"), '')")
+		}
+	}
+	nameExpressions = append(nameExpressions, "''")
+	nameExpr := "''"
+	if len(nameExpressions) > 1 {
+		nameExpr = "COALESCE(" + strings.Join(nameExpressions, ", ") + ")"
+	}
+	createdExpr := "''"
+	if columns["created"] {
+		// Preserve the actual DB DATETIME; no ID-based age or timezone is invented.
+		createdExpr = "COALESCE(CAST(net.created AS CHAR), '')"
+	}
+	query := fmt.Sprintf("SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s FROM networks net %s %s ORDER BY net.id",
+		expr("uuid", "id"), nameExpr, expr("guest_type", "network_type", "type"), expr("cidr", "network_cidr"),
 		expr("broadcast_uri"), expr("vlan_id"), moldCoalesceExpression("zone", zones, []string{"uuid", "id"}, "''"),
-		moldCoalesceExpression("zone", zones, []string{"name"}, "''"), join, where)
+		moldCoalesceExpression("zone", zones, []string{"name"}, "''"), createdExpr, join, where)
 	rows, err := db.Query(query)
 	if err != nil {
 		return nil, err
@@ -38,7 +55,7 @@ func loadMoldNetworkCatalog(db *sql.DB) ([]VMNetworkInfo, error) {
 	result := []VMNetworkInfo{}
 	for rows.Next() {
 		var item VMNetworkInfo
-		if err := rows.Scan(&item.NetworkID, &item.NetworkName, &item.NetworkType, &item.CIDR, &item.BroadcastURI, &item.VLAN, &item.ZoneID, &item.ZoneName); err != nil {
+		if err := rows.Scan(&item.NetworkID, &item.NetworkName, &item.NetworkType, &item.CIDR, &item.BroadcastURI, &item.VLAN, &item.ZoneID, &item.ZoneName, &item.NetworkCreatedAt); err != nil {
 			return nil, err
 		}
 		result = append(result, item)

@@ -12,18 +12,26 @@ import (
 
 type wallGuestExporter struct{ instance, job string }
 
-var wallSystemVMName = regexp.MustCompile(`(?i)^(ccvm|scvm)[0-9]*$`)
+var wallSystemVMName = regexp.MustCompile(`(?i)^(?:(?:ccvm|scvm)[0-9]*|[sv]-[0-9]+-VM)$`)
+var wallMoldSystemVMName = regexp.MustCompile(`(?i)^[sv]-[0-9]+-VM$`)
 
-// Local control/storage VMs use node_exporter, unlike Mold VM domains.
+// Control/storage VMs and Mold service VMs use their guest node_exporter.
 // Match a guest MAC or its exact nodename; never select a whole job or the
 // first exporter when several storage VMs share the same domain name.
 func resolveWallSystemVMExporter(ctx context.Context, client *http.Client, prometheusURL, domain, macList string, now time.Time) (*wallGuestExporter, error) {
 	if !wallSystemVMName.MatchString(domain) {
 		return nil, nil
 	}
-	job := "scvm"
-	if strings.HasPrefix(strings.ToLower(domain), "ccvm") {
-		job = "ccvm"
+	job := ""
+	if !wallMoldSystemVMName.MatchString(domain) {
+		job = "scvm"
+		if strings.HasPrefix(strings.ToLower(domain), "ccvm") {
+			job = "ccvm"
+		}
+	}
+	jobSelector := ""
+	if job != "" {
+		jobSelector = fmt.Sprintf("job=%q,", job)
 	}
 	macs := []string{}
 	for _, value := range strings.Split(macList, ",") {
@@ -33,9 +41,9 @@ func resolveWallSystemVMExporter(ctx context.Context, client *http.Client, prome
 	}
 	queries := []string{}
 	if len(macs) > 0 {
-		queries = append(queries, fmt.Sprintf(`node_network_info{job=%q,address=~%q}`, job, prometheusRegexAlternation(macs...)))
+		queries = append(queries, fmt.Sprintf(`node_network_info{%saddress=~%q}`, jobSelector, prometheusRegexAlternation(macs...)))
 	}
-	queries = append(queries, fmt.Sprintf(`node_uname_info{job=%q,nodename=%q}`, job, domain))
+	queries = append(queries, fmt.Sprintf(`node_uname_info{%snodename=%q}`, jobSelector, domain))
 	for _, query := range queries {
 		result, err := queryPrometheusRange(ctx, client, prometheusURL, query, now.Add(-2*time.Minute), now, 30*time.Second)
 		if err != nil {
@@ -45,7 +53,7 @@ func resolveWallSystemVMExporter(ctx context.Context, client *http.Client, prome
 		for _, series := range result.Data.Result {
 			instance, _ := series.Metric["instance"].(string)
 			metricJob, _ := series.Metric["job"].(string)
-			if instance == "" || metricJob != job {
+			if instance == "" || metricJob == "" || (job != "" && metricJob != job) {
 				continue
 			}
 			for i := len(series.Values) - 1; i >= 0; i-- {
@@ -54,13 +62,13 @@ func resolveWallSystemVMExporter(ctx context.Context, client *http.Client, prome
 					continue
 				}
 				if value := parsePrometheusFloat(point[1]); value != nil && *value > 0 {
-					matches[instance] = wallGuestExporter{instance: instance, job: job}
+					matches[metricJob+"\x00"+instance] = wallGuestExporter{instance: instance, job: metricJob}
 				}
 				break
 			}
 		}
 		if len(matches) > 1 {
-			return nil, fmt.Errorf("multiple %s exporters match %s; an exact guest NIC MAC is required", job, domain)
+			return nil, fmt.Errorf("multiple node exporters match %s; an exact guest NIC MAC is required", domain)
 		}
 		for _, match := range matches {
 			return &match, nil

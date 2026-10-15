@@ -190,6 +190,18 @@ func handleWallVMTrend(w http.ResponseWriter, r *http.Request) {
 		writeWallHostTrendJSON(w, http.StatusOK, wallSystemVMTrend(ctx, client, prometheusURL, firstNonEmptyString(domain, instanceName, name), *exporter, start, end, step))
 		return
 	}
+	// Mold service VMs report guest measurements through node_exporter. A
+	// missing registration must not silently switch to hypervisor statistics.
+	if wallMoldSystemVMName.MatchString(firstNonEmptyString(domain, instanceName, name)) {
+		missing := wallHostTrendQueryTemplates()
+		for i := range missing {
+			missing[i].Values = []wallHostTrendPoint{}
+		}
+		writeWallHostTrendJSON(w, http.StatusOK, wallHostTrendResponse{Host: firstNonEmptyString(domain, instanceName, name), Range: trendRange.String(), Step: step.String(),
+			Start: start.Unix(), End: end.Unix(), PromURL: prometheusURL, Series: missing,
+			Warnings: []string{"system VM node_exporter not found; register an exporter with an exact guest NIC MAC or nodename"}})
+		return
+	}
 	queryTemplates := wallHostTrendQueryTemplates()
 	series := make([]wallHostTrendSeries, 0, len(queryTemplates))
 	warnings := make([]string, 0)
