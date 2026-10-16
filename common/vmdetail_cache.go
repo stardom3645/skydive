@@ -11,16 +11,17 @@ import (
 )
 
 type VMDetailInfo struct {
-	UUID         string `json:"uuid"`
-	InstanceName string `json:"instanceName"`
-	Name         string `json:"name"`
-	DisplayName  string `json:"displayName"`
-	State        string `json:"state"`
-	HostName     string `json:"hostName"`
-	PrivateIP    string `json:"privateIp"`
-	GuestOS      string `json:"guestOS"`
-	CPUNumber    string `json:"cpuNumber"`
-	Memory       string `json:"memory"`
+	UUID         string   `json:"uuid"`
+	InstanceName string   `json:"instanceName"`
+	Name         string   `json:"name"`
+	DisplayName  string   `json:"displayName"`
+	State        string   `json:"state"`
+	HostName     string   `json:"hostName"`
+	PrivateIP    string   `json:"privateIp"`
+	GuestOS      string   `json:"guestOS"`
+	CPUNumber    string   `json:"cpuNumber"`
+	Memory       string   `json:"memory"`
+	PublicIPs    []string `json:"publicIps,omitempty"`
 }
 
 var (
@@ -78,6 +79,21 @@ func LoadVMDetailMapFromCloudstack() {
 		}
 	}
 
+	if err := rows.Err(); err != nil {
+		log.Printf("DB read failed for vm detail map: %v", err)
+		return
+	}
+	rows.Close()
+	publicIPs, err := loadMoldVMPublicIPs(db)
+	if err != nil {
+		// Missing/unconfirmed bindings must not retain a previous VM's IPs.
+		log.Printf("DB read failed for VM public IP bindings: %v", err)
+	} else {
+		for key, item := range temp {
+			item.PublicIPs = publicIPs[strings.ToLower(strings.TrimSpace(item.UUID))]
+			temp[key] = item
+		}
+	}
 	vmDetailMapLock.Lock()
 	vmDetailMap = temp
 	vmDetailLastLoad = time.Now()
