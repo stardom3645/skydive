@@ -29,8 +29,9 @@ Netdive extension APIs reuse the Analyzer's configured
 `X-Auth-Token`, and HTTP Basic authentication. API paths, successful response
 payloads, ports and Kubernetes collection behavior are unchanged.
 
-The following previously unprotected routes now authenticate before accessing
-cached data, Mold, Kubernetes, Wall, or collection state:
+The following previously unprotected routes now use the configured Analyzer
+authentication backend and RBAC before accessing cached data, Mold,
+Kubernetes, Wall, or collection state:
 
 | Permission | Routes |
 |---|---|
@@ -47,13 +48,17 @@ role already has all three permissions. The `guest` role can read topology
 but cannot change collection or open a VM console. Custom roles use the same
 Casbin objects/actions; no new policy format or login system is introduced.
 
-Missing/invalid credentials return **401**; authenticated users without the
-required permission receive **403** before the underlying handler runs.
-For these 19 routes, a nil or `noauth` backend also returns **401**, even if
-a token is supplied: `noauth` cannot verify user identity. Deployments that
-use `noauth` must configure an existing authenticated backend and sign in
-through the existing login before using these protected routes. This change
-does not modify authentication settings or the initial API Key/Secret setup.
+When an authenticating backend is configured, missing/invalid credentials
+return **401**; authenticated users without the required permission receive
+**403** before the underlying handler runs. A nil backend also returns **401**.
+
+Existing deployments configured with `noauth` retain their login-free behavior;
+no additional login or authentication configuration is required for them.
+The original backend supplies its administrative identity without validating
+a user. Consequently this mode does **not** provide user authentication or
+user-specific access control, and these route changes must not be described
+as fixing anonymous access in a `noauth` deployment. This change does not
+modify authentication settings or the initial API Key/Secret setup.
 
 Cookie-only requests from an existing same-origin login continue to work.
 For saved logins restored without a browser session cookie, the v2 frontend
@@ -76,6 +81,8 @@ policies with a local test policy store. Its subprocess isolates process-global
 RBAC from older handler tests. Existing-cookie login, header-only saved login,
 unchanged methods/payloads, rejected-request side effects, and authorized
 collection selection are covered without contacting production services.
+All 19 routes are also exercised without credentials under the existing
+`noauth` backend to prevent introducing a login requirement accidentally.
 
 ## Key features
 

@@ -74,15 +74,19 @@ func TestNetdiveAPIAuthentication(t *testing.T) {
 	defer common.SetMoldAPICredentialsStore(nil)
 
 	starts, stops := 0, 0
-	server := &shttp.Server{Router: mux.NewRouter()}
-	RegisterMoldKubernetesAPI(server, backend, func() error { starts++; return nil }, func() { stops++ }, func() bool { return false })
-	RegisterVmNameMapAPI(server, backend, func() map[string]string { return map[string]string{"vm-id": "VM name"} })
-	RegisterVMNetworkMapAPI(server, backend, func() map[string][]common.VMNetworkInfo { return map[string][]common.VMNetworkInfo{} }, 10*time.Second)
-	RegisterVMDetailMapAPI(server, backend, func() map[string]common.VMDetailInfo { return map[string]common.VMDetailInfo{} }, 10*time.Second)
-	RegisterMoldHostDetailAPI(server, backend)
-	RegisterMoldManagementServerAPI(server, backend)
-	RegisterMoldVMConsoleAPI(server, backend)
-	RegisterWallHostTrendAPI(server, backend)
+	registerAPIs := func(backend shttp.AuthenticationBackend) *shttp.Server {
+		server := &shttp.Server{Router: mux.NewRouter()}
+		RegisterMoldKubernetesAPI(server, backend, func() error { starts++; return nil }, func() { stops++ }, func() bool { return false })
+		RegisterVmNameMapAPI(server, backend, func() map[string]string { return map[string]string{"vm-id": "VM name"} })
+		RegisterVMNetworkMapAPI(server, backend, func() map[string][]common.VMNetworkInfo { return map[string][]common.VMNetworkInfo{} }, 10*time.Second)
+		RegisterVMDetailMapAPI(server, backend, func() map[string]common.VMDetailInfo { return map[string]common.VMDetailInfo{} }, 10*time.Second)
+		RegisterMoldHostDetailAPI(server, backend)
+		RegisterMoldManagementServerAPI(server, backend)
+		RegisterMoldVMConsoleAPI(server, backend)
+		RegisterWallHostTrendAPI(server, backend)
+		return server
+	}
+	server := registerAPIs(backend)
 
 	type endpoint struct {
 		method, path, permission string
@@ -189,20 +193,32 @@ func TestNetdiveAPIAuthentication(t *testing.T) {
 		}
 	})
 
-	t.Run("nil and noauth cannot grant anonymous admin even with a claimed token", func(t *testing.T) {
-		for _, backend := range []shttp.AuthenticationBackend{nil, shttp.NewNoAuthenticationBackend()} {
-			server := &shttp.Server{Router: mux.NewRouter()}
-			called := false
-			RegisterVmNameMapAPI(server, backend, func() map[string]string { called = true; return nil })
-			for _, token := range []string{"", base64.StdEncoding.EncodeToString([]byte("auth-admin:password")), "fake-token"} {
-				request := httptest.NewRequest("GET", "/api/vm-name-map", nil)
-				request.Header.Set("X-Auth-Token", token)
+	t.Run("nil backend still fails closed", func(t *testing.T) {
+		server := &shttp.Server{Router: mux.NewRouter()}
+		called := false
+		RegisterVmNameMapAPI(server, nil, func() map[string]string { called = true; return nil })
+		for _, token := range []string{"", base64.StdEncoding.EncodeToString([]byte("auth-admin:password")), "fake-token"} {
+			request := httptest.NewRequest("GET", "/api/vm-name-map", nil)
+			request.Header.Set("X-Auth-Token", token)
+			w := httptest.NewRecorder()
+			server.Router.ServeHTTP(w, request)
+			if w.Code != 401 || called {
+				t.Fatalf("unconfigured authentication accepted: status=%d, handler=%t", w.Code, called)
+			}
+		}
+	})
+
+	t.Run("configured noauth preserves all existing login-free routes", func(t *testing.T) {
+		server := registerAPIs(shttp.NewNoAuthenticationBackend())
+		for _, endpoint := range endpoints {
+			t.Run(endpoint.method+" "+endpoint.path, func(t *testing.T) {
+				request := httptest.NewRequest(endpoint.method, endpoint.path, strings.NewReader(`{}`))
 				w := httptest.NewRecorder()
 				server.Router.ServeHTTP(w, request)
-				if w.Code != 401 || called {
-					t.Fatalf("unconfigured authentication accepted: status=%d, handler=%t", w.Code, called)
+				if w.Code != endpoint.allowedStatus {
+					t.Fatalf("existing login-free request changed: status=%d, want=%d, body=%s", w.Code, endpoint.allowedStatus, w.Body.String())
 				}
-			}
+			})
 		}
 	})
 

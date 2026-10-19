@@ -8,8 +8,8 @@ import (
 	"github.com/skydive-project/skydive/graffiti/rbac"
 )
 
-// Keep legacy handlers and their payloads unchanged. Authentication and RBAC
-// must run before a handler can access Mold, Kubernetes, Wall or local caches.
+// Keep legacy handlers and their payloads unchanged. Use the configured
+// Analyzer authentication mode and RBAC before dispatching supplemental APIs.
 type netdiveAPIRoute struct {
 	Name    string
 	Method  string
@@ -20,9 +20,10 @@ type netdiveAPIRoute struct {
 }
 
 func registerNetdiveAPIRoutes(server *shttp.Server, backend shttp.AuthenticationBackend, routes []netdiveAPIRoute) {
-	// noauth assigns "admin" without checking credentials. It cannot protect
-	// these APIs, even when a caller supplies an arbitrary token or cookie.
-	authenticationEnabled := backend != nil && backend.Name() != "noauth"
+	// Respect the existing login-free deployment when noauth is configured.
+	// It provides no user authentication; do not silently turn it into a login
+	// requirement. An accidentally missing backend still fails closed.
+	backendConfigured := backend != nil
 	if backend == nil {
 		backend = shttp.NewNoAuthenticationBackend()
 	}
@@ -32,7 +33,7 @@ func registerNetdiveAPIRoutes(server *shttp.Server, backend shttp.Authentication
 		authenticatedRoutes = append(authenticatedRoutes, shttp.Route{
 			Name: route.Name, Method: route.Method, Path: route.Path,
 			HandlerFunc: func(w http.ResponseWriter, r *auth.AuthenticatedRequest) {
-				if !authenticationEnabled || r.Username == "" {
+				if !backendConfigured || r.Username == "" {
 					shttp.Unauthorized(w, &r.Request, shttp.ErrWrongCredentials)
 					return
 				}
