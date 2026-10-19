@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	auth "github.com/abbot/go-http-auth"
+	"github.com/gorilla/mux"
+	shttp "github.com/skydive-project/skydive/graffiti/http"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -20,7 +23,8 @@ import (
 
 func TestKubernetesPodYAMLCurrentIdentityRedactionAndNoMutation(t *testing.T) {
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "workloads", UID: types.UID("pod-uid"), ResourceVersion: "10",
-		Labels: map[string]string{"app": "web"}, Annotations: map[string]string{"kubectl.kubernetes.io/last-applied-configuration": `{"token":"annotation-secret"}`}},
+		Labels: map[string]string{"app": "web"}, Annotations: map[string]string{"kubectl.kubernetes.io/last-applied-configuration": `{"token":"annotation-secret"}`},
+		ManagedFields: []metav1.ManagedFieldsEntry{{Manager: "test-field-manager", APIVersion: "v1"}}},
 		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "example/web:1",
 			Env:  []corev1.EnvVar{{Name: "PRIVATE_ENV", Value: "literal-secret"}, {Name: "REFERENCE_ENV", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "private-secret-ref"}, Key: "private-secret-key"}}}},
 			Args: []string{"--password=argument-secret"}, LivenessProbe: &corev1.Probe{Handler: corev1.Handler{HTTPGet: &corev1.HTTPGetAction{HTTPHeaders: []corev1.HTTPHeader{{Name: "Authorization", Value: "header-secret"}}}}}}},
@@ -50,10 +54,18 @@ func TestKubernetesPodYAMLCurrentIdentityRedactionAndNoMutation(t *testing.T) {
 		if w.Code != 200 || result.UID != "pod-uid" || !result.Redacted || result.FetchedAt.IsZero() || w.Header().Get("Cache-Control") != "no-store" {
 			t.Fatalf("unexpected response %d %#v", w.Code, result)
 		}
-		for _, secret := range []string{"literal-secret", "PRIVATE_ENV", "REFERENCE_ENV", "private-secret-ref", "private-secret-key", "annotation-secret", "argument-secret", "header-secret", "init-secret", "ephemeral-secret"} {
+		for _, secret := range []string{"literal-secret", "annotation-secret", "argument-secret", "header-secret", "init-secret", "ephemeral-secret"} {
 			if strings.Contains(result.YAML, secret) {
 				t.Fatalf("leaked %s", secret)
 			}
+		}
+		for _, reference := range []string{"PRIVATE_ENV", "REFERENCE_ENV", "private-secret-ref", "private-secret-key"} {
+			if !strings.Contains(result.YAML, reference) {
+				t.Fatalf("reference or environment name hidden: %s", reference)
+			}
+		}
+		if strings.Contains(result.YAML, "managedFields") || strings.Contains(result.YAML, "test-field-manager") {
+			t.Fatal("managedFields bookkeeping exposed")
 		}
 		var decoded map[string]interface{}
 		if err := yaml.Unmarshal([]byte(result.YAML), &decoded); err != nil {
@@ -66,6 +78,38 @@ func TestKubernetesPodYAMLCurrentIdentityRedactionAndNoMutation(t *testing.T) {
 	after, _ := json.Marshal(pod)
 	if string(original) != string(after) || calls != 2 {
 		t.Fatalf("mutated source or cached request: calls=%d", calls)
+	}
+}
+
+type kubernetesYAMLDenyAuthentication struct {
+	shttp.NoAuthenticationBackend
+	calls int
+}
+
+func (backend *kubernetesYAMLDenyAuthentication) Wrap(_ auth.AuthenticatedHandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		backend.calls++
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+	}
+}
+
+func TestKubernetesPodYAMLRouteRequiresConfiguredAuthenticationAndIsReadOnly(t *testing.T) {
+	server := &shttp.Server{Router: mux.NewRouter()}
+	backend := &kubernetesYAMLDenyAuthentication{}
+	RegisterKubernetesPodYAMLAPI(server, backend)
+	for _, method := range []string{"GET", "POST", "PUT", "PATCH", "DELETE"} {
+		w := httptest.NewRecorder()
+		server.Router.ServeHTTP(w, httptest.NewRequest(method, "/api/mold/kubernetes-clusters/pods/yaml", nil))
+		expected := http.StatusMethodNotAllowed
+		if method == "GET" {
+			expected = http.StatusUnauthorized
+		}
+		if w.Code != expected {
+			t.Fatalf("%s: expected %d, got %d", method, expected, w.Code)
+		}
+	}
+	if backend.calls != 1 {
+		t.Fatalf("authentication wrapper was bypassed: calls=%d", backend.calls)
 	}
 }
 

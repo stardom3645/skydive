@@ -72,7 +72,7 @@ func (b *BasicAuthenticationBackend) Wrap(wrapped auth.AuthenticatedHandlerFunc)
 
 		// if not coming from cookie or X-Auth-Token
 		s := strings.SplitN(token, " ", 2)
-		if len(s) == 2 || s[0] == "Basic" {
+		if len(s) == 2 {
 			token = s[1]
 		}
 

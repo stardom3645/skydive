@@ -74,9 +74,11 @@ type moldHostLookupParams struct {
 	ManagementIP string
 }
 
-func RegisterMoldHostDetailAPI(httpServer *shttp.Server) {
-	httpServer.Router.HandleFunc("/api/mold/hosts/detail", handleMoldHostDetail).Methods("GET")
-	httpServer.Router.HandleFunc("/api/mold/system-vms/detail", handleMoldSystemVMDetail).Methods("GET")
+func RegisterMoldHostDetailAPI(httpServer *shttp.Server, authBackend shttp.AuthenticationBackend) {
+	registerNetdiveAPIRoutes(httpServer, authBackend, []netdiveAPIRoute{
+		{Name: "MoldHostDetail", Method: "GET", Path: "/api/mold/hosts/detail", Object: "topology", Action: "read", Handler: handleMoldHostDetail},
+		{Name: "MoldSystemVMDetail", Method: "GET", Path: "/api/mold/system-vms/detail", Object: "topology", Action: "read", Handler: handleMoldSystemVMDetail},
+	})
 }
 
 func handleMoldHostDetail(w http.ResponseWriter, r *http.Request) {

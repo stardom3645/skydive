@@ -19,10 +19,32 @@ package http
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	auth "github.com/abbot/go-http-auth"
 )
+
+func TestBasicAuthenticationRejectsMalformedCredentials(t *testing.T) {
+	provider := NewHtpasswdMapProvider(map[string]string{"user": "password"})
+	backend, err := NewBasicAuthenticationBackend("basic", provider.SecretProvider(), DefaultUserRole)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, authorization := range []string{"", "Basic", "Basic ", "Basic invalid-base64", "Bearer invalid"} {
+		t.Run(authorization, func(t *testing.T) {
+			called := false
+			handler := backend.Wrap(func(http.ResponseWriter, *auth.AuthenticatedRequest) { called = true })
+			request := httptest.NewRequest("GET", "/api/status", nil)
+			request.Header.Set("Authorization", authorization)
+			w := httptest.NewRecorder()
+			handler(w, request)
+			if w.Code != http.StatusUnauthorized || called {
+				t.Fatalf("invalid authentication accepted: status=%d, called=%t", w.Code, called)
+			}
+		})
+	}
+}
 
 type fakeResponseWriter struct {
 	headers http.Header

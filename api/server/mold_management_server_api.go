@@ -16,8 +16,10 @@ type moldManagementServersResponse struct {
 	ManagementServers []map[string]interface{} `json:"managementservers"`
 }
 
-func RegisterMoldManagementServerAPI(httpServer *shttp.Server) {
-	httpServer.Router.HandleFunc("/api/mold/management-servers", handleMoldManagementServers).Methods("GET")
+func RegisterMoldManagementServerAPI(httpServer *shttp.Server, authBackend shttp.AuthenticationBackend) {
+	registerNetdiveAPIRoutes(httpServer, authBackend, []netdiveAPIRoute{
+		{Name: "MoldManagementServers", Method: "GET", Path: "/api/mold/management-servers", Object: "topology", Action: "read", Handler: handleMoldManagementServers},
+	})
 }
 
 func handleMoldManagementServers(w http.ResponseWriter, _ *http.Request) {

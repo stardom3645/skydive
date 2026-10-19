@@ -22,6 +22,61 @@ topology and flows information.
 
 ![](https://github.com/skydive-project/skydive.network/raw/images/overview.gif)
 
+## Netdive v2 API authentication
+
+Netdive extension APIs reuse the Analyzer's configured
+`analyzer.auth.api.backend`, existing login cookie (`authtoken`),
+`X-Auth-Token`, and HTTP Basic authentication. API paths, successful response
+payloads, ports and Kubernetes collection behavior are unchanged.
+
+The following previously unprotected routes now authenticate before accessing
+cached data, Mold, Kubernetes, Wall, or collection state:
+
+| Permission | Routes |
+|---|---|
+| `topology / read` | `GET /api/vm-name-map`, `/api/vm-network-map`, `/api/vm-detail-map` |
+| `topology / read` | `GET /api/mold/hosts/detail`, `/api/mold/system-vms/detail`, `/api/mold/management-servers` |
+| `topology / read` | `GET /api/wall/hosts/trend`, `/api/wall/vms/trend` |
+| `topology / read` | `GET /api/mold/kubernetes-clusters`, and its `/summary`, `/nodes/detail`, `/namespaces/detail`, `/pods/detail`, `/pods/logs`, `/services/detail` routes |
+| `mold-credentials / write` | `POST /api/mold/kubernetes-clusters/select`, `/disable`, `/test` |
+| `node / write` | `GET /api/mold/vmconsole` (creates access to an interactive console) |
+
+Collection controls reuse the existing integration-management permission;
+they do not change credential registration or storage. The bundled `admin`
+role already has all three permissions. The `guest` role can read topology
+but cannot change collection or open a VM console. Custom roles use the same
+Casbin objects/actions; no new policy format or login system is introduced.
+
+Missing/invalid credentials return **401**; authenticated users without the
+required permission receive **403** before the underlying handler runs.
+For these 19 routes, a nil or `noauth` backend also returns **401**, even if
+a token is supplied: `noauth` cannot verify user identity. Deployments that
+use `noauth` must configure an existing authenticated backend and sign in
+through the existing login before using these protected routes. This change
+does not modify authentication settings or the initial API Key/Secret setup.
+
+Cookie-only requests from an existing same-origin login continue to work.
+For saved logins restored without a browser session cookie, the v2 frontend
+also sends its existing session token from the shared supplemental request
+options. This is limited to Kubernetes management, VM mapping and management
+server requests; no UI interaction or credential storage changes are needed.
+
+Run the backend regression checks from the repository root (Graffiti is a
+nested module resolved through the root module):
+
+```console
+go test ./api/server ./analyzer ./common ./netdive/database ./netdive/eventhistory ./topology/probes/k8s github.com/skydive-project/skydive/graffiti/http
+```
+
+`TestNetdiveAPIAuthentication` exercises all 19 real registered routes with
+anonymous, invalid token/cookie/password, malformed Basic, denied, reader,
+collection operator, console operator and administrator requests. It uses
+production Basic authentication and the configured Casbin model/bundled
+policies with a local test policy store. Its subprocess isolates process-global
+RBAC from older handler tests. Existing-cookie login, header-only saved login,
+unchanged methods/payloads, rejected-request side effects, and authorized
+collection selection are covered without contacting production services.
+
 ## Key features
 
 * Captures network topology and flows

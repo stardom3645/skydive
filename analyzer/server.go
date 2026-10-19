@@ -448,22 +448,22 @@ func NewServerFromConfig() (*Server, error) {
 	common.StartVMDetailMapAutoRefresh(vmNetworkRefreshInterval)
 
 	// API 등록
-	api.RegisterVmNameMapAPI(httpServer, common.GetVmNameMap)
-	api.RegisterVMNetworkMapAPI(httpServer, common.GetVMNetworkMap, vmNetworkRefreshInterval)
-	api.RegisterVMDetailMapAPI(httpServer, common.GetVMDetailMap, vmNetworkRefreshInterval)
-	api.RegisterMoldVMConsoleAPI(httpServer)
+	api.RegisterVmNameMapAPI(httpServer, apiAuthBackend, common.GetVmNameMap)
+	api.RegisterVMNetworkMapAPI(httpServer, apiAuthBackend, common.GetVMNetworkMap, vmNetworkRefreshInterval)
+	api.RegisterVMDetailMapAPI(httpServer, apiAuthBackend, common.GetVMDetailMap, vmNetworkRefreshInterval)
+	api.RegisterMoldVMConsoleAPI(httpServer, apiAuthBackend)
 	api.RegisterMoldCredentialsAPI(httpServer, apiAuthBackend)
 	api.RegisterMoldRelatedServicesAPI(httpServer, apiAuthBackend)
-	api.RegisterMoldKubernetesAPI(httpServer, startMoldKubernetesProbe(g, probeBundle), stopMoldKubernetesProbe(probeBundle), isMoldKubernetesProbeRunning(probeBundle))
+	api.RegisterMoldKubernetesAPI(httpServer, apiAuthBackend, startMoldKubernetesProbe(g, probeBundle), stopMoldKubernetesProbe(probeBundle), isMoldKubernetesProbeRunning(probeBundle))
 	api.RegisterKubernetesPodYAMLAPI(httpServer, apiAuthBackend)
-	api.RegisterMoldHostDetailAPI(httpServer)
-	api.RegisterMoldManagementServerAPI(httpServer)
+	api.RegisterMoldHostDetailAPI(httpServer, apiAuthBackend)
+	api.RegisterMoldManagementServerAPI(httpServer, apiAuthBackend)
 	api.RegisterInfrastructureAgentRestartAPI(httpServer, apiAuthBackend)
 	s.eventHistoryCleanup = api.RegisterEventHistoryAPI(httpServer, apiAuthBackend, s.localDB, g)
 	if s.localDB != nil {
 		s.manualPortMappingCleanup = api.RegisterManualPortMappingAPI(httpServer, apiAuthBackend, s.localDB, g)
 	}
-	api.RegisterWallHostTrendAPI(hub.HTTPServer())
+	api.RegisterWallHostTrendAPI(httpServer, apiAuthBackend)
 
 	if err := s.loadStaticWorkflows(); err != nil {
 		return nil, err

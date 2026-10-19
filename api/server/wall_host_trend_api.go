@@ -63,9 +63,11 @@ type prometheusQueryRangeResponse struct {
 	} `json:"data"`
 }
 
-func RegisterWallHostTrendAPI(httpServer *shttp.Server) {
-	httpServer.Router.HandleFunc("/api/wall/hosts/trend", handleWallHostTrend).Methods("GET")
-	httpServer.Router.HandleFunc("/api/wall/vms/trend", handleWallVMTrend).Methods("GET")
+func RegisterWallHostTrendAPI(httpServer *shttp.Server, authBackend shttp.AuthenticationBackend) {
+	registerNetdiveAPIRoutes(httpServer, authBackend, []netdiveAPIRoute{
+		{Name: "WallHostTrend", Method: "GET", Path: "/api/wall/hosts/trend", Object: "topology", Action: "read", Handler: handleWallHostTrend},
+		{Name: "WallVMTrend", Method: "GET", Path: "/api/wall/vms/trend", Object: "topology", Action: "read", Handler: handleWallVMTrend},
+	})
 }
 
 func handleWallHostTrend(w http.ResponseWriter, r *http.Request) {

@@ -1366,23 +1366,25 @@ func writeJSON(w http.ResponseWriter, payload interface{}) {
 	}
 }
 
-func RegisterMoldKubernetesAPI(httpServer *shttp.Server, startProbe moldKubernetesProbeStarter, stopProbe moldKubernetesProbeStopper, isProbeRunning moldKubernetesProbeStatus) {
-	httpServer.Router.HandleFunc("/api/mold/kubernetes-clusters", func(w http.ResponseWriter, r *http.Request) {
-		handleMoldKubernetesClusters(w, r, isProbeRunning, stopProbe)
-	}).Methods("GET")
-	httpServer.Router.HandleFunc("/api/mold/kubernetes-clusters/select", func(w http.ResponseWriter, r *http.Request) {
-		handleMoldKubernetesSelect(w, r, startProbe)
-	}).Methods("POST")
-	httpServer.Router.HandleFunc("/api/mold/kubernetes-clusters/disable", func(w http.ResponseWriter, r *http.Request) {
-		handleMoldKubernetesDisable(w, r, stopProbe)
-	}).Methods("POST")
-	httpServer.Router.HandleFunc("/api/mold/kubernetes-clusters/test", handleMoldKubernetesTest).Methods("POST")
-	httpServer.Router.HandleFunc("/api/mold/kubernetes-clusters/summary", func(w http.ResponseWriter, r *http.Request) {
-		handleMoldKubernetesClusterSummary(w, r, isProbeRunning)
-	}).Methods("GET")
-	httpServer.Router.HandleFunc("/api/mold/kubernetes-clusters/nodes/detail", handleMoldKubernetesNodeDetail).Methods("GET")
-	httpServer.Router.HandleFunc("/api/mold/kubernetes-clusters/namespaces/detail", handleMoldKubernetesNamespaceDetail).Methods("GET")
-	httpServer.Router.HandleFunc("/api/mold/kubernetes-clusters/pods/detail", handleMoldKubernetesPodDetail).Methods("GET")
-	httpServer.Router.HandleFunc("/api/mold/kubernetes-clusters/pods/logs", handleMoldKubernetesPodLogs).Methods("GET")
-	httpServer.Router.HandleFunc("/api/mold/kubernetes-clusters/services/detail", handleMoldKubernetesServiceDetail).Methods("GET")
+func RegisterMoldKubernetesAPI(httpServer *shttp.Server, authBackend shttp.AuthenticationBackend, startProbe moldKubernetesProbeStarter, stopProbe moldKubernetesProbeStopper, isProbeRunning moldKubernetesProbeStatus) {
+	registerNetdiveAPIRoutes(httpServer, authBackend, []netdiveAPIRoute{
+		{Name: "MoldKubernetesClusters", Method: "GET", Path: "/api/mold/kubernetes-clusters", Object: "topology", Action: "read", Handler: func(w http.ResponseWriter, r *http.Request) {
+			handleMoldKubernetesClusters(w, r, isProbeRunning, stopProbe)
+		}},
+		{Name: "MoldKubernetesSelect", Method: "POST", Path: "/api/mold/kubernetes-clusters/select", Object: moldCredentialsObject, Action: "write", Handler: func(w http.ResponseWriter, r *http.Request) {
+			handleMoldKubernetesSelect(w, r, startProbe)
+		}},
+		{Name: "MoldKubernetesDisable", Method: "POST", Path: "/api/mold/kubernetes-clusters/disable", Object: moldCredentialsObject, Action: "write", Handler: func(w http.ResponseWriter, r *http.Request) {
+			handleMoldKubernetesDisable(w, r, stopProbe)
+		}},
+		{Name: "MoldKubernetesTest", Method: "POST", Path: "/api/mold/kubernetes-clusters/test", Object: moldCredentialsObject, Action: "write", Handler: handleMoldKubernetesTest},
+		{Name: "MoldKubernetesSummary", Method: "GET", Path: "/api/mold/kubernetes-clusters/summary", Object: "topology", Action: "read", Handler: func(w http.ResponseWriter, r *http.Request) {
+			handleMoldKubernetesClusterSummary(w, r, isProbeRunning)
+		}},
+		{Name: "MoldKubernetesNodeDetail", Method: "GET", Path: "/api/mold/kubernetes-clusters/nodes/detail", Object: "topology", Action: "read", Handler: handleMoldKubernetesNodeDetail},
+		{Name: "MoldKubernetesNamespaceDetail", Method: "GET", Path: "/api/mold/kubernetes-clusters/namespaces/detail", Object: "topology", Action: "read", Handler: handleMoldKubernetesNamespaceDetail},
+		{Name: "MoldKubernetesPodDetail", Method: "GET", Path: "/api/mold/kubernetes-clusters/pods/detail", Object: "topology", Action: "read", Handler: handleMoldKubernetesPodDetail},
+		{Name: "MoldKubernetesPodLogs", Method: "GET", Path: "/api/mold/kubernetes-clusters/pods/logs", Object: "topology", Action: "read", Handler: handleMoldKubernetesPodLogs},
+		{Name: "MoldKubernetesServiceDetail", Method: "GET", Path: "/api/mold/kubernetes-clusters/services/detail", Object: "topology", Action: "read", Handler: handleMoldKubernetesServiceDetail},
+	})
 }

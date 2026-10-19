@@ -321,6 +321,8 @@ func findConsoleURL(v interface{}) string {
 	return ""
 }
 
-func RegisterMoldVMConsoleAPI(httpServer *shttp.Server) {
-	httpServer.Router.HandleFunc("/api/mold/vmconsole", handleMoldVMConsole).Methods("GET")
+func RegisterMoldVMConsoleAPI(httpServer *shttp.Server, authBackend shttp.AuthenticationBackend) {
+	registerNetdiveAPIRoutes(httpServer, authBackend, []netdiveAPIRoute{
+		{Name: "MoldVMConsole", Method: "GET", Path: "/api/mold/vmconsole", Object: "node", Action: "write", Handler: handleMoldVMConsole},
+	})
 }

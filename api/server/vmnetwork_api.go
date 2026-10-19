@@ -10,15 +10,18 @@ import (
 	shttp "github.com/skydive-project/skydive/graffiti/http"
 )
 
-func RegisterVMNetworkMapAPI(httpServer *shttp.Server, getMap func() map[string][]common.VMNetworkInfo, refreshInterval time.Duration) {
-	httpServer.Router.HandleFunc("/api/vm-network-map", func(w http.ResponseWriter, r *http.Request) {
-		common.EnsureVMNetworkMapFresh(5 * time.Second)
-		lastLoad := common.GetVMNetworkMapLastLoad()
-		if !lastLoad.IsZero() {
-			w.Header().Set("X-VMNetworkMap-Last-Load", lastLoad.UTC().Format(time.RFC3339))
-		}
-		w.Header().Set("X-VMNetworkMap-Refresh-Interval", fmt.Sprintf("%ds", int(refreshInterval.Seconds())))
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(getMap())
-	}).Methods("GET")
+func RegisterVMNetworkMapAPI(httpServer *shttp.Server, authBackend shttp.AuthenticationBackend, getMap func() map[string][]common.VMNetworkInfo, refreshInterval time.Duration) {
+	registerNetdiveAPIRoutes(httpServer, authBackend, []netdiveAPIRoute{{
+		Name: "VMNetworkMap", Method: "GET", Path: "/api/vm-network-map", Object: "topology", Action: "read",
+		Handler: func(w http.ResponseWriter, r *http.Request) {
+			common.EnsureVMNetworkMapFresh(5 * time.Second)
+			lastLoad := common.GetVMNetworkMapLastLoad()
+			if !lastLoad.IsZero() {
+				w.Header().Set("X-VMNetworkMap-Last-Load", lastLoad.UTC().Format(time.RFC3339))
+			}
+			w.Header().Set("X-VMNetworkMap-Refresh-Interval", fmt.Sprintf("%ds", int(refreshInterval.Seconds())))
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(getMap())
+		},
+	}})
 }

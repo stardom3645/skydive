@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 
@@ -104,50 +103,6 @@ func serveKubernetesPodYAML(w http.ResponseWriter, r *http.Request, client kuber
 	}
 	writeJSON(w, kubernetesYAMLResponse{ClusterID: q.Get("id"), UID: string(pod.UID), Namespace: pod.Namespace,
 		Name: pod.Name, YAML: string(encoded), Redacted: redacted, FetchedAt: time.Now().UTC()})
-}
-
-var kubernetesYAMLSensitiveKey = regexp.MustCompile(`(?i)(password|passwd|token|credential|private.?key|client.?key|api.?key|secret|authorization)`)
-
-// Environment values and secret references are not exposed by existing Pod
-// details. Preserve their nesting while hiding scalar values, including init
-// and ephemeral containers. Free-form annotations/commands may embed secrets.
-func redactKubernetesYAML(value interface{}) bool {
-	changed := false
-	switch object := value.(type) {
-	case map[string]interface{}:
-		for key, child := range object {
-			if key == "env" || key == "envFrom" || key == "annotations" || key == "command" || key == "args" || key == "httpHeaders" || kubernetesYAMLSensitiveKey.MatchString(key) {
-				object[key] = redactKubernetesYAMLLeaves(child)
-				changed = true
-			} else if redactKubernetesYAML(child) {
-				changed = true
-			}
-		}
-	case []interface{}:
-		for _, child := range object {
-			if redactKubernetesYAML(child) {
-				changed = true
-			}
-		}
-	}
-	return changed
-}
-
-func redactKubernetesYAMLLeaves(value interface{}) interface{} {
-	switch object := value.(type) {
-	case map[string]interface{}:
-		for key, child := range object {
-			object[key] = redactKubernetesYAMLLeaves(child)
-		}
-		return object
-	case []interface{}:
-		for i, child := range object {
-			object[i] = redactKubernetesYAMLLeaves(child)
-		}
-		return object
-	default:
-		return kubernetesYAMLRedacted
-	}
 }
 
 // A read-only inspection failure does not change Pod or collection verdicts.
