@@ -19,7 +19,7 @@ func TestWallRootDiskSelectors(t *testing.T) {
 			}
 		}
 		vm := wallVMTrendQuery(key, "i-2-42-VM|s-173-VM")
-		if !strings.Contains(vm, `partition_mountpoint="/"`) || !strings.Contains(vm, `domain=~"i-2-42-VM|s-173-VM"`) {
+		if strings.Contains(vm, `partition_mountpoint="/"`) || !strings.Contains(vm, `domain=~"i-2-42-VM|s-173-VM"`) {
 			t.Fatalf("VM root selector missing: %s", vm)
 		}
 		if strings.Contains(vm, "block_meta") {

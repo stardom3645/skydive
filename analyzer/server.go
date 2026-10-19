@@ -455,6 +455,7 @@ func NewServerFromConfig() (*Server, error) {
 	api.RegisterMoldCredentialsAPI(httpServer, apiAuthBackend)
 	api.RegisterMoldRelatedServicesAPI(httpServer, apiAuthBackend)
 	api.RegisterMoldKubernetesAPI(httpServer, startMoldKubernetesProbe(g, probeBundle), stopMoldKubernetesProbe(probeBundle), isMoldKubernetesProbeRunning(probeBundle))
+	api.RegisterKubernetesPodYAMLAPI(httpServer, apiAuthBackend)
 	api.RegisterMoldHostDetailAPI(httpServer)
 	api.RegisterMoldManagementServerAPI(httpServer)
 	api.RegisterInfrastructureAgentRestartAPI(httpServer, apiAuthBackend)

@@ -335,7 +335,9 @@ func wallHostTrendQuery(key, prometheusInstance, prometheusJob string) string {
 func wallVMTrendQuery(key, domainRegex string) string {
 	switch key {
 	case "rootDiskTotal", "rootDiskUsed", "rootDiskAvailable":
-		selector := fmt.Sprintf(`{domain=~"%s", partition_mountpoint="/"}`, domainRegex)
+		// Wall collects guest filesystems on Linux and Windows. Select the
+		// actual root filesystem after matching the returned partition labels.
+		selector := fmt.Sprintf(`{domain=~"%s"}`, domainRegex)
 		total := "libvirt_domain_fs_info_total_bytes" + selector
 		used := "libvirt_domain_fs_info_usage_bytes" + selector
 		if key == "rootDiskUsed" {
@@ -418,8 +420,26 @@ func startWallRootDiskQueries(ctx context.Context, client *http.Client, promethe
 				}(i)
 			}
 			pending.Wait()
+			if domainRegex != "" {
+				items[0].Values, items[0].Labels = pickWallVMRootFilesystem(results[0], nil)
+				if items[0].Labels == nil && results[0] != nil && len(results[0].Data.Result) > 0 {
+					// Linux '/' does not need Mold metadata. Windows drive letters
+					// need a verified ROOT volume; never assume C: is the OS disk.
+					query := fmt.Sprintf(`libvirt_domain_block_meta{domain=~"%s", serial!=""}`, domainRegex)
+					metadata, _ := queryPrometheusRange(ctx, client, prometheusURL, query, start, end, step)
+					items[0].Values, items[0].Labels = pickWallVMRootFilesystem(results[0], metadata)
+				}
+				for i := 1; i < len(items); i++ {
+					if items[0].Labels != nil {
+						items[i].Values, items[i].Labels = pickWallRootDiskSeries(results[i], items[0].Labels)
+					}
+				}
+			} else {
+				for i := range items {
+					items[i].Values, items[i].Labels = pickWallRootDiskSeries(results[i], items[0].Labels)
+				}
+			}
 			for i := range items {
-				items[i].Values, items[i].Labels = pickWallRootDiskSeries(results[i], items[0].Labels)
 				items[i].LastValue = lastTrendValue(items[i].Values)
 			}
 			// Keep total/used/available on the same exporter; never combine hosts.
