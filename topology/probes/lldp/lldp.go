@@ -50,16 +50,6 @@ import (
 */
 import "C"
 
-const lldpBPFFilter = `ether[0] & 1 = 1 and
-  ether proto 0x88cc and
-  !(ether src %s) and
-  (ether dst 01:80:c2:00:00:0e or
-   ether dst 01:80:c2:00:00:03 or
-   ether dst 01:80:c2:00:00:00)`
-
-// Capture 8192 bytes so that we have the full Ethernet frame
-const lldpSnapLen = 8192
-
 // Probe describes the probe that is in charge of listening for
 // LLDP packets on interfaces and create the corresponding chassis and port nodes
 type Probe struct {
@@ -346,7 +336,7 @@ func (p *Probe) startCapture(ifName, mac string, n *graph.Node) error {
 			&lldpCapture{})
 
 		if err != nil {
-			p.Ctx.Logger.Errorf("LLDP capture error on %s", ifName)
+			p.Ctx.Logger.Errorf("LLDP capture error on %s: %v", ifName, err)
 		}
 	}()
 
