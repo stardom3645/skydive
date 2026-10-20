@@ -60,23 +60,20 @@ func aggregateKubernetesServiceImpact(
 	for i := range services {
 		service := &services[i]
 		key := service.Namespace + "/" + service.Name
+		if service.Spec.Type == corev1.ServiceTypeExternalName {
+			continue
+		}
 		if slices, found := slicesByService[key]; found {
 			impact := kubernetesServiceImpact{}
-			for _, slice := range slices {
-				for _, endpoint := range slice.Endpoints {
-					impact.CandidateEndpoints++
-					ready := endpoint.Conditions.Ready == nil || *endpoint.Conditions.Ready
-					if !ready {
-						continue
-					}
-					if endpoint.TargetRef != nil && endpoint.TargetRef.Kind == "Pod" {
-						uid := string(endpoint.TargetRef.UID)
-						if impactedPodUIDs[uid] {
-							continue
-						}
-					}
-					impact.ReadyEndpoints++
+			for _, endpoint := range kubernetesSliceEndpoints(slices) {
+				impact.CandidateEndpoints++
+				if !kubernetesEndpointReady(endpoint.Ready) {
+					continue
 				}
+				if endpoint.TargetKind == "Pod" && impactedPodUIDs[endpoint.TargetUID] {
+					continue
+				}
+				impact.ReadyEndpoints++
 			}
 			impact.Affected = impact.ReadyEndpoints == 0
 			if impact.Affected {

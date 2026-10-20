@@ -54,7 +54,7 @@ func newDaemonSetProbe(client interface{}, g *graph.Graph) Subprobe {
 func daemonSetPodAreLinked(a, b interface{}) bool {
 	ds := a.(*v1apps.DaemonSet)
 	pod := b.(*v1.Pod)
-	return MatchNamespace(pod, ds) && matchLabelSelector(pod, ds.Spec.Selector)
+	return MatchNamespace(pod, ds) && controlledBy(pod, ds, "DaemonSet")
 }
 
 func newDaemonSetPodLinker(manager string) LinkHandler {

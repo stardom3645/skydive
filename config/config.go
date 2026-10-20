@@ -118,7 +118,7 @@ func init() {
 	cfg.SetDefault("agent.topology.blockdev.lsblk_path", "/usr/bin/lsblk")
 	cfg.SetDefault("agent.topology.docker.url", "unix:///var/run/docker.sock")
 	cfg.SetDefault("agent.topology.docker.netns.run_path", "/var/run/docker/netns")
-	cfg.SetDefault("agent.topology.netlink.metrics_update", 30)
+	cfg.SetDefault("agent.topology.netlink.metrics_update", 10)
 	cfg.SetDefault("agent.topology.netns.run_path", "/var/run/netns")
 	cfg.SetDefault("agent.topology.neutron.domain_name", "Default")
 	cfg.SetDefault("agent.topology.neutron.endpoint_type", "public")

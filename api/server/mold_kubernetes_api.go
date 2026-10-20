@@ -652,23 +652,11 @@ func collectKubernetesClusterSummary(cluster moldKubernetesCluster) (moldKuberne
 	}
 
 	externalPaths := make(map[string]bool)
-	endpointNodes := make(map[string]map[string]bool)
+	serviceSlices := make(map[string][]discoveryv1.EndpointSlice)
 	if endpointSliceErr == nil {
-		for i := range endpointSlices.Items {
-			slice := &endpointSlices.Items[i]
-			serviceName := slice.Labels[discoveryv1.LabelServiceName]
-			if serviceName == "" {
-				continue
-			}
-			serviceKey := slice.Namespace + "/" + serviceName
-			if endpointNodes[serviceKey] == nil {
-				endpointNodes[serviceKey] = make(map[string]bool)
-			}
-			for _, endpoint := range slice.Endpoints {
-				if (endpoint.Conditions.Ready == nil || *endpoint.Conditions.Ready) && endpoint.NodeName != nil {
-					endpointNodes[serviceKey][*endpoint.NodeName] = true
-				}
-			}
+		for _, slice := range endpointSlices.Items {
+			key := slice.Namespace + "/" + slice.Labels[discoveryv1.LabelServiceName]
+			serviceSlices[key] = append(serviceSlices[key], slice)
 		}
 	}
 	for i := range services.Items {
@@ -677,7 +665,11 @@ func collectKubernetesClusterSummary(cluster moldKubernetesCluster) (moldKuberne
 		if service.Spec.Type == corev1.ServiceTypeNodePort || service.Spec.Type == corev1.ServiceTypeLoadBalancer || service.Spec.Type == corev1.ServiceTypeExternalName || len(service.Spec.ExternalIPs) > 0 {
 			externalPaths[fmt.Sprintf("Service %s/%s (%s)", service.Namespace, service.Name, service.Spec.Type)] = true
 		}
-		if len(endpointNodes[serviceKey]) == 1 {
+		endpointStatus := kubernetesServiceDetail{Type: string(service.Spec.Type), EndpointDataAvailable: endpointSliceErr == nil, Endpoints: kubernetesSliceEndpoints(serviceSlices[serviceKey])}
+		applyKubernetesServiceEndpointStatus(&endpointStatus)
+		// The cluster risk count includes a single Ready target as before;
+		// detail distinguishes that case from multiple targets on one node.
+		if service.Spec.Type != corev1.ServiceTypeExternalName && kubernetesReadyEndpointsOnSingleNode(endpointStatus.Endpoints) {
 			summary.SingleNodeEndpointServiceCount++
 		}
 	}

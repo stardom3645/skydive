@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -320,14 +321,20 @@ func automaticPortRelationForName(g *graph.Graph, switchNode *graph.Node, switch
 		if portType := nodeType(current); (portType == "switchport" || portType == "port") &&
 			strings.EqualFold(topologyPortName(current), wanted) {
 			for _, edge := range g.GetNodeEdges(current, nil) {
+				if !topology.LLDPLinkIsCurrent(edge, time.Now()) {
+					continue
+				}
 				relationType, _ := edge.GetFieldString("RelationType")
 				if strings.EqualFold(strings.TrimSpace(relationType), topology.OwnershipLink) {
 					continue
 				}
-				found = true
 				parents, children := g.GetEdgeNodes(edge, nil, nil)
 				for _, peer := range append(parents, children...) {
-					if peer.ID != current.ID && isPhysicalHostNIC(peer) {
+					if peer.ID == current.ID || peer.ID == switchNode.ID {
+						continue
+					}
+					found = true
+					if isPhysicalHostNIC(peer) {
 						matches[peer.ID] = struct{}{}
 					}
 				}
@@ -339,6 +346,9 @@ func automaticPortRelationForName(g *graph.Graph, switchNode *graph.Node, switch
 	// Older LLDP graphs can link the switch directly to a host NIC and keep the
 	// remote port identifier only in the NIC's LLDP metadata.
 	for _, edge := range g.GetNodeEdges(switchNode, nil) {
+		if !topology.LLDPLinkIsCurrent(edge, time.Now()) {
+			continue
+		}
 		relationType, _ := edge.GetFieldString("RelationType")
 		if strings.EqualFold(strings.TrimSpace(relationType), topology.OwnershipLink) {
 			continue
@@ -349,7 +359,6 @@ func automaticPortRelationForName(g *graph.Graph, switchNode *graph.Node, switch
 				continue
 			}
 			if isPhysicalHostNIC(peer) && strings.EqualFold(lldpRemotePortName(peer), wanted) {
-				found = true
 				matches[peer.ID] = struct{}{}
 			}
 		}
@@ -380,6 +389,9 @@ func lldpRemotePortName(node *graph.Node) string {
 
 func hasAutomaticHostNICRelation(g *graph.Graph, hostNIC *graph.Node) bool {
 	for _, edge := range g.GetNodeEdges(hostNIC, nil) {
+		if !topology.LLDPLinkIsCurrent(edge, time.Now()) {
+			continue
+		}
 		relationType, _ := edge.GetFieldString("RelationType")
 		if strings.EqualFold(strings.TrimSpace(relationType), topology.OwnershipLink) {
 			continue

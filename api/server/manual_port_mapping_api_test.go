@@ -409,3 +409,27 @@ func TestManualPortMappingRBACPolicyIsBundled(t *testing.T) {
 		}
 	}
 }
+
+func TestExpiredLLDPAndChassisLinkDoNotReserveManualMapping(t *testing.T) {
+	fixture := newManualPortMappingAPIFixture(t)
+	g := fixture.graph
+	switchNode := g.GetNode("switch-1")
+	port := g.GetNode("port-1")
+	nic := g.GetNode("nic-1")
+	topology.AddLayer2Link(g, switchNode, port, nil)
+	topology.AddLayer2Link(g, port, nic, graph.Metadata{"LLDP": graph.Metadata{"ExpiresAt": int64(1)}})
+	if hasAutomaticPortName(g, switchNode, "Ethernet1") || hasAutomaticHostNICRelation(g, nic) {
+		t.Fatal("stale/internal relation blocked manual mapping")
+	}
+	recorder := httptest.NewRecorder()
+	fixture.api.create(recorder, authenticatedManualPortMappingRequest(http.MethodPost, "/api/infrastructure/manual-port-mappings", manualPortMappingRequest{SwitchNodeID: "switch-1", SwitchPortName: "Ethernet1", HostNodeID: "host-1", HostNICNodeID: "nic-1"}))
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("manual create = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	reconciler := &manualPortMappingReconciler{db: fixture.db, graph: g}
+	reconciler.reconcile()
+	active, err := fixture.db.ListManualPortMappings(context.Background(), netdivedb.ManualPortMappingFilter{})
+	if err != nil || len(active) != 1 {
+		t.Fatalf("manual record changed on stale observation: %+v %v", active, err)
+	}
+}

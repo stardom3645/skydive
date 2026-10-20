@@ -226,8 +226,10 @@ agent:
         # run_path: /var/run/docker/netns
 
     netlink:
-      # delay in seconds between two metric updates
-      # metrics_update: 30
+      # Interval in seconds for interface counter collection (default: 10).
+      # Traffic rates use the actual elapsed interval, not an instantaneous rate.
+      # Applies to physical and virtual interfaces tracked by netlink.
+      # metrics_update: 10
 
     netns:
       # allow to specify where the netns probe is watching network namespace

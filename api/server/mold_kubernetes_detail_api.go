@@ -966,7 +966,6 @@ func handleMoldKubernetesServiceDetail(w http.ResponseWriter, r *http.Request) {
 		detail.InternalTrafficPolicy = string(*service.Spec.InternalTrafficPolicy)
 	}
 	slices, sliceErr := client.DiscoveryV1().EndpointSlices(service.Namespace).List(ctx, metav1.ListOptions{LabelSelector: discoveryv1.LabelServiceName + "=" + service.Name})
-	nodes := make(map[string]bool)
 	podUIDs := make(map[string]bool)
 	if sliceErr == nil {
 		detail.EndpointDataAvailable = true
@@ -989,7 +988,6 @@ func handleMoldKubernetesServiceDetail(w http.ResponseWriter, r *http.Request) {
 					item := kubernetesEndpointDetail{Address: address, Ready: endpoint.Conditions.Ready, Serving: endpoint.Conditions.Serving, Terminating: endpoint.Conditions.Terminating, EndpointSlice: slice.Name, Ports: ports}
 					if endpoint.NodeName != nil {
 						item.NodeName = *endpoint.NodeName
-						nodes[item.NodeName] = true
 					}
 					if endpoint.Zone != nil {
 						item.Zone = *endpoint.Zone
@@ -1005,18 +1003,6 @@ func handleMoldKubernetesServiceDetail(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 					detail.Endpoints = append(detail.Endpoints, item)
-					detail.EndpointCount++
-					if endpoint.Conditions.Ready != nil && *endpoint.Conditions.Ready {
-						detail.ReadyEndpointCount++
-					} else {
-						detail.NotReadyEndpointCount++
-					}
-					if endpoint.Conditions.Serving != nil && *endpoint.Conditions.Serving {
-						detail.ServingEndpointCount++
-					}
-					if endpoint.Conditions.Terminating != nil && *endpoint.Conditions.Terminating {
-						detail.TerminatingEndpointCount++
-					}
 				}
 			}
 		}
@@ -1036,7 +1022,6 @@ func handleMoldKubernetesServiceDetail(w http.ResponseWriter, r *http.Request) {
 				item := kubernetesEndpointDetail{Address: address.IP, Ready: &readyValue, Ports: portDetails}
 				if address.NodeName != nil {
 					item.NodeName = *address.NodeName
-					nodes[item.NodeName] = true
 				}
 				if address.TargetRef != nil {
 					item.TargetKind = address.TargetRef.Kind
@@ -1049,12 +1034,6 @@ func handleMoldKubernetesServiceDetail(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				detail.Endpoints = append(detail.Endpoints, item)
-				detail.EndpointCount++
-				if ready {
-					detail.ReadyEndpointCount++
-				} else {
-					detail.NotReadyEndpointCount++
-				}
 			}
 			for _, subset := range legacyEndpoints.Subsets {
 				for _, address := range subset.Addresses {
@@ -1092,7 +1071,6 @@ func handleMoldKubernetesServiceDetail(w http.ResponseWriter, r *http.Request) {
 			for _, pod := range pods.Items {
 				if labelsMatch(service.Spec.Selector, pod.Labels) {
 					detail.SelectedPods = append(detail.SelectedPods, kubernetesObjectReference{UID: string(pod.UID), Kind: "Pod", Name: pod.Name, Namespace: pod.Namespace})
-					nodes[pod.Spec.NodeName] = true
 				}
 			}
 		}
@@ -1149,9 +1127,7 @@ func handleMoldKubernetesServiceDetail(w http.ResponseWriter, r *http.Request) {
 	if detail.RelationshipSource == "" {
 		detail.RelationshipSource = "UNKNOWN"
 	}
-	detail.NoReadyEndpoints = detail.EndpointDataAvailable && detail.ReadyEndpointCount == 0
-	detail.SingleEndpoint = detail.EndpointDataAvailable && detail.ReadyEndpointCount == 1
-	detail.SingleNodeConcentration = detail.EndpointDataAvailable && detail.ReadyEndpointCount > 1 && len(nodes) == 1
+	applyKubernetesServiceEndpointStatus(&detail)
 	detail.SelectorWithoutMatchingPods = len(service.Spec.Selector) > 0 && len(detail.SelectedPods) == 0
 	setKubernetesCollectionState(cluster.ID, kubernetesHealthy, nil)
 	writeJSON(w, detail)

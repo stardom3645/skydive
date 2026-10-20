@@ -76,11 +76,17 @@ func NewMetadataFields(o metav1.Object) graph.Metadata {
 // owner UID was not collected by an older API source.
 func controlledBy(child, parent metav1.Object, parentKind string) bool {
 	parentUID := string(parent.GetUID())
+	hasController := false
 	for _, owner := range child.GetOwnerReferences() {
-		if owner.Kind != parentKind {
+		if owner.Controller != nil && *owner.Controller {
+			hasController = true
+		}
+	}
+	for _, owner := range child.GetOwnerReferences() {
+		if owner.Kind != parentKind || (owner.Controller != nil && !*owner.Controller) || (hasController && owner.Controller == nil) {
 			continue
 		}
-		if string(owner.UID) != "" && parentUID != "" {
+		if string(owner.UID) != "" {
 			if string(owner.UID) == parentUID {
 				return true
 			}

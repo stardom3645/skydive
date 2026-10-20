@@ -1,3 +1,4 @@
+//go:build linux
 // +build linux
 
 /*
@@ -25,6 +26,7 @@ import (
 	"net"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/google/gopacket"
@@ -67,7 +69,8 @@ type Probe struct {
 	interfaceMap  map[string]*gp.Probe // map interface names to the packet probes
 	state         service.State        // state of the probe (running or stopped)
 	wg            sync.WaitGroup       // capture goroutines wait group
-	autoDiscovery bool                 // capture LLDP traffic on all capable interfaces
+	leaseStop     chan struct{}
+	autoDiscovery bool // capture LLDP traffic on all capable interfaces
 }
 
 type ifreq struct {
@@ -147,12 +150,10 @@ func (p *Probe) handlePacket(n *graph.Node, ifName string, packet gopacket.Packe
 			SysName:    lldpLayer.PortID.Subtype.String(),
 		}
 
-		// fmt.Println(p.interfaceMap[ifName].Ctx.Graph.GetHost())
-
 		portMetadata := graph.Metadata{
 			"LLDP":          portLLDPMetadata,
 			"Type":          "switchport",
-			"RemoteSysName": p.interfaceMap[ifName].Ctx.Graph.GetHost(),
+			"RemoteSysName": p.Ctx.Graph.GetHost(),
 		}
 
 		var portID string
@@ -205,6 +206,11 @@ func (p *Probe) handlePacket(n *graph.Node, ifName string, packet gopacket.Packe
 				}
 			}
 
+			// Preserve the decoder's legacy discriminator above so existing
+			// switch/port IDs remain stable, but select the displayed address
+			// from all advertised TLVs rather than only the final one.
+			chassisLLDPMetadata.MgmtAddress = preferredManagementAddress(lldpLayer.Values, chassisLLDPMetadata.MgmtAddress)
+
 			if lldp8201Q, err := lldpLayerInfo.Decode8021(); err == nil {
 				if lldp8201Q.LinkAggregation.Supported {
 					portLLDPMetadata.LinkAggregation = &LinkAggregationMetadata{
@@ -251,8 +257,6 @@ func (p *Probe) handlePacket(n *graph.Node, ifName string, packet gopacket.Packe
 			}
 		}
 
-		// TODO: Handle TTL (set port to down when timer expires ?)
-
 		p.Ctx.Graph.Lock()
 
 		// Create a node for the sending chassis with a predictable ID
@@ -264,21 +268,30 @@ func (p *Probe) handlePacket(n *graph.Node, ifName string, packet gopacket.Packe
 		}
 
 		chassisNodeID := graph.GenID(chassisDiscriminators...)
+		portNodeID := graph.GenID(string(chassisNodeID), portID, lldpLayer.PortID.Subtype.String())
+		if lldpLayer.TTL == 0 {
+			if port := p.Ctx.Graph.GetNode(portNodeID); port != nil {
+				_ = observeLLDPLink(p.Ctx.Graph, p.Ctx.RootNode, port, n, 0, time.Now())
+			}
+			p.Ctx.Graph.Unlock()
+			return
+		}
+		if p.Ctx.Graph.GetNode(n.ID) == nil {
+			p.Ctx.Graph.Unlock()
+			return
+		}
 		chassis := p.getOrCreate(chassisNodeID, chassisMetadata)
 
 		// Create a port with a predicatable ID
-		port := p.getOrCreate(graph.GenID(
-			string(chassisNodeID),
-			portID, lldpLayer.PortID.Subtype.String(),
-		), portMetadata)
+		port := p.getOrCreate(portNodeID, portMetadata)
 
 		if !topology.HaveOwnershipLink(p.Ctx.Graph, chassis, port) {
 			topology.AddOwnershipLink(p.Ctx.Graph, chassis, port, nil)
 			topology.AddLayer2Link(p.Ctx.Graph, chassis, port, nil)
 		}
 
-		if !topology.HaveLayer2Link(p.Ctx.Graph, port, n) {
-			topology.AddLayer2Link(p.Ctx.Graph, port, n, nil)
+		if err := observeLLDPLink(p.Ctx.Graph, p.Ctx.RootNode, port, n, lldpLayer.TTL, time.Now()); err != nil {
+			p.Ctx.Logger.Error(err)
 		}
 
 		p.Ctx.Graph.Unlock()
@@ -364,6 +377,9 @@ func (p *Probe) getOrCreate(id graph.Identifier, m graph.Metadata) *graph.Node {
 // - when its first packet layer is Ethernet and it has a MAC address
 // - when the interface is listed in the configuration file or we are in auto discovery mode
 func (p *Probe) handleNode(n *graph.Node) {
+	if p.state.Load() != service.RunningState {
+		return
+	}
 	if state, _ := n.GetFieldString("State"); state != "UP" {
 		return
 	}
@@ -415,6 +431,26 @@ func (p *Probe) Start() error {
 		return probe.ErrNotStopped
 	}
 
+	p.Ctx.Graph.Lock()
+	expireLLDPLinks(p.Ctx.Graph, p.Ctx.RootNode, time.Now(), true)
+	p.Ctx.Graph.Unlock()
+	p.leaseStop = make(chan struct{})
+	p.wg.Add(1)
+	go func(stop <-chan struct{}) {
+		defer p.wg.Done()
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case now := <-ticker.C:
+				p.Ctx.Graph.Lock()
+				expireLLDPLinks(p.Ctx.Graph, p.Ctx.RootNode, now, false)
+				p.Ctx.Graph.Unlock()
+			case <-stop:
+				return
+			}
+		}
+	}(p.leaseStop)
 	p.Ctx.Graph.AddEventListener(p)
 
 	p.Ctx.Graph.RLock()
@@ -434,14 +470,23 @@ func (p *Probe) Start() error {
 // Stop capturing LLDP packets
 func (p *Probe) Stop() {
 	p.Ctx.Graph.RemoveEventListener(p)
-	p.state.Store(service.StoppingState)
-	for intf, activeProbe := range p.interfaceMap {
+	if !p.state.CompareAndSwap(service.RunningState, service.StoppingState) {
+		return
+	}
+	close(p.leaseStop)
+	p.RLock()
+	captures := make([]*gp.Probe, 0, len(p.interfaceMap))
+	for _, activeProbe := range p.interfaceMap {
 		if activeProbe != nil {
-			p.Ctx.Logger.Debugf("Stopping probe on %s", intf)
-			activeProbe.Stop()
+			captures = append(captures, activeProbe)
 		}
 	}
+	p.RUnlock()
+	for _, activeProbe := range captures {
+		activeProbe.Stop()
+	}
 	p.wg.Wait()
+	p.state.Store(service.StoppedState)
 }
 
 // NewProbe creates a new LLDP probe

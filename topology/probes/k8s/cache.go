@@ -216,6 +216,27 @@ type ResourceCache struct {
 	clusterName string
 }
 
+// GetByNode rejects a stale same-name object and foreign-cluster graph events.
+// ResourceCache embeds a namespace/name index, but ownership is UID-scoped.
+func (c *ResourceCache) GetByNode(node *graph.Node) interface{} {
+	cluster, _ := node.GetFieldString(ClusterNameField)
+	if c.clusterName != "" && cluster != c.clusterName {
+		return nil
+	}
+	object := c.KubeCache.GetByNode(node)
+	if object == nil {
+		return nil
+	}
+	uid, _ := node.GetFieldString(MetadataField("UID"))
+	if uid == "" {
+		uid = string(node.ID)
+	}
+	if string(object.(metav1.Object).GetUID()) != uid {
+		return nil
+	}
+	return object
+}
+
 // OnAdd is called when a new Kubernetes resource has been created
 func (c *ResourceCache) OnAdd(obj interface{}) {
 	c.graph.Lock()
