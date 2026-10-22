@@ -200,6 +200,7 @@ func handleMoldCredentialsPut(w http.ResponseWriter, r *auth.AuthenticatedReques
 		writeMoldCredentialsJSON(w, http.StatusInternalServerError, moldCredentialsStatus{Message: "연동 정보를 저장하지 못했습니다."})
 		return
 	}
+	recordSavedMoldCredentials(request.APIKey, request.SecretKey)
 	writeMoldCredentialsJSON(w, http.StatusOK, moldCredentialsStatus{
 		Configured: true, APIConfigured: true, DBPasswordConfigured: true,
 		Message: "Mold API 인증 정보를 암호화하여 저장했습니다.",
@@ -215,6 +216,7 @@ func handleMoldCredentialsDelete(w http.ResponseWriter, r *auth.AuthenticatedReq
 		writeMoldCredentialsJSON(w, http.StatusInternalServerError, moldCredentialsStatus{Message: "Mold 연동 정보를 초기화하지 못했습니다."})
 		return
 	}
+	recordMoldCredentialError()
 	_, dbConfigured, err := common.MoldCredentialsConfigured()
 	if err != nil {
 		writeMoldCredentialsJSON(w, http.StatusInternalServerError, moldCredentialsStatus{Message: "저장된 연동 정보를 확인할 수 없습니다."})

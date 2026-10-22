@@ -97,6 +97,7 @@ type Server struct {
 	localDB                  *netdivedb.Database
 	manualPortMappingCleanup func()
 	eventHistoryCleanup      func()
+	moldHealthCleanup        func()
 }
 
 // GetStatus returns the status of an analyzer
@@ -225,6 +226,9 @@ func (s *Server) Start() error {
 
 // Stop the analyzer server
 func (s *Server) Stop() {
+	if s.moldHealthCleanup != nil {
+		s.moldHealthCleanup()
+	}
 	s.hub.Stop()
 	s.flowServer.Stop()
 	s.probeBundle.Stop()
@@ -452,6 +456,7 @@ func NewServerFromConfig() (*Server, error) {
 	api.RegisterVMNetworkMapAPI(httpServer, apiAuthBackend, common.GetVMNetworkMap, vmNetworkRefreshInterval)
 	api.RegisterVMDetailMapAPI(httpServer, apiAuthBackend, common.GetVMDetailMap, vmNetworkRefreshInterval)
 	api.RegisterMoldVMConsoleAPI(httpServer, apiAuthBackend)
+	s.moldHealthCleanup = api.RegisterMoldIntegrationHealthAPI(httpServer, apiAuthBackend, s.localDB)
 	api.RegisterMoldCredentialsAPI(httpServer, apiAuthBackend)
 	api.RegisterMoldRelatedServicesAPI(httpServer, apiAuthBackend)
 	api.RegisterMoldKubernetesAPI(httpServer, apiAuthBackend, startMoldKubernetesProbe(g, probeBundle), stopMoldKubernetesProbe(probeBundle), isMoldKubernetesProbeRunning(probeBundle))

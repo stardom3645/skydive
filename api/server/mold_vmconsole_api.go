@@ -143,6 +143,7 @@ func requestMoldConsoleURL(vmID, mock string) (string, error) {
 
 	apiKey, secretKey, err := common.ReadMoldAPIKeys()
 	if err != nil {
+		recordMoldCredentialError()
 		return "", newVMConsoleAPIError(http.StatusServiceUnavailable, "Mold 연동 정보가 설정되지 않았습니다.", err)
 	}
 
@@ -198,7 +199,10 @@ func verifyMoldAPIListCapabilities(client *http.Client, baseURL *url.URL, apiKey
 	return nil
 }
 
-func callMoldAPI(client *http.Client, baseURL *url.URL, command, apiKey, secretKey string, reqParams []apiParam) (string, int, error) {
+func callMoldAPI(client *http.Client, baseURL *url.URL, command, apiKey, secretKey string, reqParams []apiParam) (responseURL string, responseStatus int, responseErr error) {
+	var responseBody []byte
+	observe := beginMoldAPIObservation(command, apiKey, secretKey)
+	defer func() { observe(responseStatus, responseBody, responseErr) }()
 	u := *baseURL
 	u.RawQuery = buildSignedRawQuery(reqParams, secretKey)
 
@@ -209,6 +213,7 @@ func callMoldAPI(client *http.Client, baseURL *url.URL, command, apiKey, secretK
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
+	responseBody = body
 	if err != nil {
 		return "", resp.StatusCode, newVMConsoleAPIError(http.StatusBadGateway, "Mold API 응답 읽기 실패", err)
 	}

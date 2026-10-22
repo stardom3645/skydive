@@ -956,15 +956,18 @@ func getMoldKubernetesConfig(clusterID string) (string, error) {
 	return configData, nil
 }
 
-func requestMoldAPI(command string, params []apiParam) ([]byte, int, error) {
+func requestMoldAPI(command string, params []apiParam) (responseBody []byte, responseStatus int, responseErr error) {
 	apiCfg := common.GetMoldAPIConfig()
 	if apiCfg.Endpoint == "" {
 		return nil, 0, newVMConsoleAPIError(http.StatusServiceUnavailable, "Mold API endpoint 설정이 비어 있습니다.", nil)
 	}
 	apiKey, secretKey, err := common.ReadMoldAPIKeys()
 	if err != nil {
+		recordMoldCredentialError()
 		return nil, 0, newVMConsoleAPIError(http.StatusServiceUnavailable, "Mold API Key/Secret 로드 실패", err)
 	}
+	observe := beginMoldAPIObservation(command, apiKey, secretKey)
+	defer func() { observe(responseStatus, responseBody, responseErr) }()
 	baseURL, err := url.Parse(apiCfg.Endpoint)
 	if err != nil {
 		return nil, 0, newVMConsoleAPIError(http.StatusServiceUnavailable, "Mold API endpoint 설정이 올바르지 않습니다.", err)
