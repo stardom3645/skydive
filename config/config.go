@@ -205,7 +205,7 @@ func init() {
 	cfg.SetDefault("mold.kubernetes.enforceSelection", true)
 	cfg.SetDefault("mold.kubernetes.statusPollInterval", 30)
 	cfg.SetDefault("mold.kubernetes.transitionGracePeriod", 20)
-	cfg.SetDefault("analyzer.topology.k8s.probes", []string{"cluster", "namespace", "node", "pod", "service", "deployment", "daemonset", "statefulset", "ingress", "networkpolicy"})
+	cfg.SetDefault("analyzer.topology.k8s.probes", []string{"cluster", "namespace", "node", "pod", "service", "deployment", "replicaset", "daemonset", "statefulset", "ingress", "networkpolicy"})
 
 	// ABLESTACK Netdive local database. An empty driver keeps the database
 	// disabled for non-Netdive deployments; the Netdive configuration enables it.
